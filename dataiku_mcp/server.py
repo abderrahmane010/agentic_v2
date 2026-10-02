@@ -454,6 +454,29 @@ def test_recipe_dry_run(
     """
     return code_development.test_recipe_dry_run(project_key, recipe_name, sample_rows)
 
+@mcp.tool()
+def get_generated_sql(
+    project_key: str,
+    recipe_name: str,
+    partition: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Extract generated SQL from visual recipes (Shaker, Join, SQL-based recipes, etc.).
+    
+    This tool attempts to retrieve the actual SQL query that Dataiku will execute
+    for recipes that use SQL engines. For Shaker recipes, it provides the recipe
+    configuration since SQL is generated dynamically at runtime.
+    
+    Args:
+        project_key: The project key
+        recipe_name: Name of the recipe
+        partition: Optional partition specification for partitioned datasets
+        
+    Returns:
+        Dict containing generated SQL and recipe information
+    """
+    return code_development.get_generated_sql(project_key, recipe_name, partition)
+
 # Register Project Exploration Tools
 @mcp.tool()
 def get_project_flow(
