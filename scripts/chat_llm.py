@@ -114,10 +114,10 @@ def _texte_resultat(resultat: Any) -> str:
 
 
 _TITRES = {
-    "tables_sources": "📥 Tables sources",
-    "tables_intermediaires": "🔄 Tables intermédiaires",
-    "tables_finales": "📤 Tables finales",
-    "tables_isolees": "⚪ Tables isolées",
+    "tables_sources": " Tables sources",
+    "tables_intermediaires": " Tables intermédiaires",
+    "tables_finales": " Tables finales",
+    "tables_isolees": " Tables isolées",
 }
 
 
@@ -185,7 +185,7 @@ async def _repondre(
             except json.JSONDecodeError:
                 arguments = {}
 
-            print(f"  🔧 {nom}({json.dumps(arguments, ensure_ascii=False)})")
+            print(f" param {nom}({json.dumps(arguments, ensure_ascii=False)})")
 
             try:
                 resultat = await session.call_tool(nom, arguments)
@@ -225,7 +225,7 @@ async def main() -> None:
             outils_mcp = (await session.list_tools()).tools
             outils = [_outil_vers_openai(o) for o in outils_mcp]
 
-            print(f"✅ Connecté : {modele} — {len(outils)} outils Dataiku")
+            print(f"VALIDE : Connecté : {modele} — {len(outils)} outils Dataiku")
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": PROMPT_SYSTEME}
             ]
@@ -237,10 +237,10 @@ async def main() -> None:
                     if not questions:
                         break
                     question = questions.pop(0)
-                    print(f"\n🧑 {question}")
+                    print(f"\n {question}")
                 else:
                     try:
-                        question = input("\n🧑 Toi (/tables PROJET, exit pour quitter) : ").strip()
+                        question = input("\n Toi (/tables PROJET, exit pour quitter) : ").strip()
                     except (EOFError, KeyboardInterrupt):
                         break
                     if question.lower() in {"exit", "quit", "q"}:
@@ -278,7 +278,7 @@ async def main() -> None:
                         )
                     del messages[taille_historique:]
 
-                print(f"\n🤖 {texte}")
+                print(f"\n AGENT LA POSTE DATA DRIVEN :  {texte}")
 
 
 def run() -> None:
