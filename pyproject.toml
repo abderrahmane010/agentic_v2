@@ -11,7 +11,8 @@ requires-python = ">=3.11"
 dependencies = [
     "dataiku-api-client==14.0.0",
     "langchain>=1.4.3",
-    "mcp",
+    "mcp>=1.2,<2",
+    "pyyaml",
     "pydantic>=2.0.0",
     "python-dotenv",
 ]
@@ -23,6 +24,9 @@ dev = [
     "ruff",
 ]
 
+[tool.setuptools.packages.find]
+include = ["dataiku_mcp*", "scripts*"]
+
 [project.scripts]
 dataiku-mcp-server = "scripts.mcp_server:main"
 
@@ -33,6 +37,8 @@ target-version = ['py311']
 [tool.ruff]
 line-length = 80
 target-version = "py311"
+
+[tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "C4", "UP"]
 
 [tool.pytest.ini_options]

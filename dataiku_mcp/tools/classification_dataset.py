@@ -38,16 +38,6 @@ def _classer_datasets_flow_interne(
     dans le Flow Dataiku, pas nécessairement sa nature métier."""
     flow = _cartographier_flow_interne(project_key)
 
-    datasets: dict[str, dict[str, Any]] = {}
-
-
-    if not project_key or not project_key.strip():
-        raise ValueError("project_key ne doit pas etre vide")
-    return _classer_datasets_flow_interne(
-        project_key.strip
-    )
-    flow = _cartographier_flow_interne(project_key)
-
     datasets: dict[str, dict] = {}
 
     for noeud in flow.get("noeuds", []):
