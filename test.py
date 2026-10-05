@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import datauri
+import dataiku
 import pandas as pd
 import requests
 import os

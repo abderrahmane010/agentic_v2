@@ -22,10 +22,10 @@ from dataiku_mcp.securite import (
 )
 from dataiku_mcp.tools import (
     advanced_scenarios,
+    classification_dataset as flow_classification,
     code_development,
     datasets,
     environment_config,
-    flow_classification,
     monitoring_debug,
     productivity,
     project_exploration,
@@ -320,7 +320,7 @@ def run_scenario(project_key: str, scenario_id: str) -> Dict[str, Any]:
     """
     return scenarios.run_scenario(project_key, scenario_id)
 #----------scenario avancé---------------
-mcp.tool()
+@mcp.tool()
 @outil_securise()
 def get_scenario_logs(
     project_key: str,

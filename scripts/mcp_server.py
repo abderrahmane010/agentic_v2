@@ -14,8 +14,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dataiku_mcp.server import create_server
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging (stderr: stdout is reserved for the MCP stdio protocol)
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
 def main():
@@ -62,7 +62,9 @@ def main():
             server.run()
         elif args.transport == "sse":
             logger.info(f"Using SSE transport on {args.host}:{args.port}")
-            server.run_sse(host=args.host, port=args.port)
+            server.settings.host = args.host
+            server.settings.port = args.port
+            server.run(transport="sse")
             
     except KeyboardInterrupt:
         logger.info("Server stopped by user")
