@@ -10,7 +10,6 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "dataiku-api-client==14.0.0",
-    "langchain>=1.4.3",
     "mcp>=1.2,<2",
     "openai>=1.0",
     "pyyaml",
