@@ -455,14 +455,27 @@ def list_datasets(
     project_key: str,
     dataset_type: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """List ALL datasets (tables) of a project. Use this to answer
-    "what are the datasets / tables of project X".
+    """List ALL dataset names of a project (flat list, not classified).
+    To classify them as source / intermediate / final, use
+    classer_datasets_flow instead.
 
     Args:
         project_key: The project key
-        dataset_type: Optional filter on dataset type (e.g. 'Snowflake')
+        dataset_type: Optional filter on dataset type (e.g. 'HDFS')
     """
-    return datasets.list_datasets(project_key, dataset_type)
+    resultat = datasets.list_datasets(project_key, dataset_type)
+    if resultat.get("status") != "ok":
+        return resultat
+    # Sortie compacte : le contexte du LLM est limité.
+    return {
+        "status": "ok",
+        "project_key": project_key,
+        "total_count": resultat["total_count"],
+        "datasets": [
+            {"name": d["name"], "type": d["type"], "connection": d["connection"]}
+            for d in resultat["datasets"]
+        ],
+    }
 
 
 @mcp.tool()
@@ -508,9 +521,13 @@ def get_project_flow(project_key: str) -> Dict[str, Any]:
  
 @mcp.tool()
 @outil_securise()
-def classer_datasets_flow(project_key: str) -> Dict[str, Any]:
-    """Classify the project's datasets by their position in the Flow:
-    sources, intermediates, finals and isolated datasets.
+def classer_datasets_flow(
+    project_key: str,
+    details: bool = False,
+) -> Dict[str, Any]:
+    """List ALL datasets (tables) of a project classified by their position
+    in the Flow: sources, intermediates, finals and isolated datasets.
+    Use this by default when asked for the datasets / tables of a project.
  
     Classification is topological (based on recipe dependencies),
     not necessarily business meaning. Managed folders, models and datasets
@@ -518,8 +535,9 @@ def classer_datasets_flow(project_key: str) -> Dict[str, Any]:
  
     Args:
         project_key: The project key
+        details: Also return producing/consuming recipes for each dataset
     """
-    return flow_classification.classer_datasets_flow(project_key)
+    return flow_classification.classer_datasets_flow(project_key, details)
  
  
 @mcp.tool()

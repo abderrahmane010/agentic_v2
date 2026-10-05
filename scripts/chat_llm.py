@@ -34,7 +34,7 @@ RACINE = Path(__file__).resolve().parent.parent
 load_dotenv(RACINE / ".env")
 
 # Limite la taille des résultats d'outils renvoyés au LLM (contexte limité).
-TAILLE_MAX_RESULTAT = 12_000
+TAILLE_MAX_RESULTAT = int(os.environ.get("CHAT_MAX_RESULT_CHARS", "40000"))
 NB_MAX_APPELS_OUTILS = 10
 
 PROMPT_SYSTEME = """Tu es un assistant expert de Dataiku DSS.
@@ -42,9 +42,13 @@ Tu disposes d'outils pour interroger l'instance DSS (projets, Flow,
 datasets, recettes, scénarios, jobs...).
 - Utilise les outils pour obtenir des informations réelles, n'invente rien.
 - Si la clé projet (project_key) manque, demande-la à l'utilisateur.
-- Pour lister les datasets/tables d'un projet : list_datasets.
+- Pour la liste des datasets/tables d'un projet : classer_datasets_flow,
+  puis présente-les classés en 4 sections (sources, intermédiaires,
+  finales, isolées) avec le nombre de chaque catégorie.
+- list_datasets seulement pour une liste brute non classée.
 - Pour lister les recettes ou scénarios : list_recipes / list_scenarios.
-- Pour les tables sources/intermédiaires/finales : classer_datasets_flow.
+- Quand tu listes des éléments, donne-les TOUS, sans en omettre ni
+  résumer par "...", et indique le total.
 - Pour connaître les projets disponibles : list_dss_projects.
 - Réponds en français, de façon concise et structurée."""
 
@@ -96,9 +100,58 @@ def _texte_resultat(resultat: Any) -> str:
     ]
     texte = "\n".join(morceaux) or "(résultat vide)"
 
+    # JSON compact (sans indentation) : jusqu'à 2x moins de tokens.
+    try:
+        texte = json.dumps(
+            json.loads(texte), ensure_ascii=False, separators=(",", ":")
+        )
+    except ValueError:
+        pass
+
     if len(texte) > TAILLE_MAX_RESULTAT:
         texte = texte[:TAILLE_MAX_RESULTAT] + "\n... (résultat tronqué)"
     return texte
+
+
+_TITRES = {
+    "tables_sources": "📥 Tables sources",
+    "tables_intermediaires": "🔄 Tables intermédiaires",
+    "tables_finales": "📤 Tables finales",
+    "tables_isolees": "⚪ Tables isolées",
+}
+
+
+async def _afficher_tables(session: ClientSession, commande: str) -> None:
+    """Commande /tables PROJET : affiche la classification complète du Flow
+    directement, sans passer par le LLM (aucun dataset oublié)."""
+    morceaux = commande.split()
+    if len(morceaux) < 2:
+        print("Usage : /tables CLE_PROJET")
+        return
+
+    resultat = await session.call_tool(
+        "classer_datasets_flow", {"project_key": morceaux[1]}
+    )
+    try:
+        donnees = json.loads(_texte_resultat(resultat))
+    except ValueError:
+        print(_texte_resultat(resultat))
+        return
+
+    if "statistiques" not in donnees:
+        print(f"Erreur : {donnees.get('error') or donnees}")
+        return
+
+    print(f"\nProjet {donnees['projet']} — "
+          f"{donnees['statistiques']['nb_datasets_total']} datasets")
+    for cle, titre in _TITRES.items():
+        elements = donnees.get(cle, [])
+        print(f"\n{titre} ({len(elements)})")
+        for element in elements:
+            connexion = element.get("connexion") or "-"
+            print(f"  - {element['nom']}  [{element.get('type')}, {connexion}]")
+    for erreur in donnees.get("erreurs_flow", []):
+        print(f"\n⚠️  Recette {erreur.get('recette')} : {erreur.get('erreur')}")
 
 
 async def _repondre(
@@ -187,13 +240,17 @@ async def main() -> None:
                     print(f"\n🧑 {question}")
                 else:
                     try:
-                        question = input("\n🧑 Toi (exit pour quitter) : ").strip()
+                        question = input("\n🧑 Toi (/tables PROJET, exit pour quitter) : ").strip()
                     except (EOFError, KeyboardInterrupt):
                         break
                     if question.lower() in {"exit", "quit", "q"}:
                         break
                     if not question:
                         continue
+
+                if question.startswith("/tables"):
+                    await _afficher_tables(session, question)
+                    continue
 
                 taille_historique = len(messages)
                 messages.append({"role": "user", "content": question})

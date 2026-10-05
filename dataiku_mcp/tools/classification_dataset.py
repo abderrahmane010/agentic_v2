@@ -3,10 +3,24 @@ from typing import Any
 from dataiku_mcp.client import get_project
 
 
+_CATEGORIES = (
+    "tables_sources",
+    "tables_intermediaires",
+    "tables_finales",
+    "tables_isolees",
+)
+
+
 def classer_datasets_flow(
     project_key: str,
+    details: bool = False,
 ) -> dict[str, Any]:
-    """Classe publiquement les datasets selon leur position dans le Flow."""
+    """Classe publiquement les datasets selon leur position dans le Flow.
+
+    Par défaut le résultat est compact (nom, type, connexion par dataset),
+    adapté à un LLM. ``details=True`` renvoie aussi les recettes
+    productrices/consommatrices, les explications et les avertissements.
+    """
     if not isinstance(project_key, str):
         raise TypeError(
             "project_key doit être une chaîne de caractères, "
@@ -20,7 +34,39 @@ def classer_datasets_flow(
             "project_key ne doit pas être vide"
         )
 
-    return _classer_datasets_flow_interne(project_key)
+    resultat = _classer_datasets_flow_interne(project_key)
+
+    if details:
+        return resultat
+
+    return _compacter(resultat)
+
+
+def _compacter(resultat: dict[str, Any]) -> dict[str, Any]:
+    """Ne garde que l'essentiel de la classification."""
+    compact: dict[str, Any] = {
+        "projet": resultat["projet"],
+        "statistiques": resultat["statistiques"],
+    }
+
+    for categorie in _CATEGORIES:
+        compact[categorie] = [
+            {
+                "nom": dataset["nom"],
+                "type": dataset.get("type"),
+                "connexion": dataset.get("connexion"),
+            }
+            for dataset in resultat[categorie]
+        ]
+
+    if resultat.get("erreurs_flow"):
+        compact["erreurs_flow"] = resultat["erreurs_flow"]
+
+    compact["note"] = (
+        "Classification topologique basée sur les dépendances visibles "
+        "dans le Flow (pas forcément le sens métier)."
+    )
+    return compact
 
 
 def _classer_datasets_flow_interne(
