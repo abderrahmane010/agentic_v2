@@ -444,6 +444,59 @@ def get_generated_sql(
 # ===========================================================================
 @mcp.tool()
 @outil_securise()
+def list_dss_projects() -> Dict[str, Any]:
+    """List the keys of all Dataiku projects this server can access."""
+    return {"status": "ok", "projects": filtrer_projets(list_projects())}
+
+
+@mcp.tool()
+@outil_securise()
+def list_datasets(
+    project_key: str,
+    dataset_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    """List ALL datasets (tables) of a project. Use this to answer
+    "what are the datasets / tables of project X".
+
+    Args:
+        project_key: The project key
+        dataset_type: Optional filter on dataset type (e.g. 'Snowflake')
+    """
+    return datasets.list_datasets(project_key, dataset_type)
+
+
+@mcp.tool()
+@outil_securise()
+def list_recipes(
+    project_key: str,
+    recipe_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    """List ALL recipes of a project.
+
+    Args:
+        project_key: The project key
+        recipe_type: Optional filter on recipe type (e.g. 'python', 'sql')
+    """
+    return recipes.list_recipes(project_key, recipe_type)
+
+
+@mcp.tool()
+@outil_securise()
+def list_scenarios(
+    project_key: str,
+    active_only: bool = False,
+) -> Dict[str, Any]:
+    """List ALL scenarios of a project.
+
+    Args:
+        project_key: The project key
+        active_only: Only return active scenarios
+    """
+    return scenarios.list_scenarios(project_key, None, active_only)
+
+
+@mcp.tool()
+@outil_securise()
 def get_project_flow(project_key: str) -> Dict[str, Any]:
     """Get complete data flow/pipeline structure.
  
@@ -476,12 +529,13 @@ def search_project_objects(
     search_term: str,
     object_types: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Search for datasets, recipes, scenarios by name/pattern.
+    """Search datasets, recipes, scenarios whose name contains a term.
+    To list everything, prefer list_datasets / list_recipes / list_scenarios.
  
     Args:
         project_key: The project key
-        search_term: Search pattern
-        object_types: List of object types to search
+        search_term: Text or pattern to search (e.g. 'client', '*client*')
+        object_types: Subset of ["datasets", "recipes", "scenarios"]
     """
     return project_exploration.search_project_objects(
         project_key, search_term, object_types

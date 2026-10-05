@@ -44,6 +44,12 @@ def _create_client() -> dataikuapi.DSSClient:
     dss_api_key = os.environ.get("DSS_API_KEY")
     insecure_tls = os.environ.get("DSS_INSECURE_TLS", "true").lower() == "true"
     
+    if insecure_tls:
+        # Vérification TLS désactivée volontairement : on évite le bruit.
+        import urllib3
+
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
     if not dss_host:
         raise ValueError("DSS_HOST environment variable is required")
     

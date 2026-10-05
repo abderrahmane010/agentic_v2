@@ -42,6 +42,10 @@ Tu disposes d'outils pour interroger l'instance DSS (projets, Flow,
 datasets, recettes, scénarios, jobs...).
 - Utilise les outils pour obtenir des informations réelles, n'invente rien.
 - Si la clé projet (project_key) manque, demande-la à l'utilisateur.
+- Pour lister les datasets/tables d'un projet : list_datasets.
+- Pour lister les recettes ou scénarios : list_recipes / list_scenarios.
+- Pour les tables sources/intermédiaires/finales : classer_datasets_flow.
+- Pour connaître les projets disponibles : list_dss_projects.
 - Réponds en français, de façon concise et structurée."""
 
 
