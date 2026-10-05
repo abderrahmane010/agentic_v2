@@ -682,6 +682,12 @@ def get_project_info(project_key: str) -> str:
  
 def create_server() -> FastMCP:
     """Create and configure the MCP server."""
+    if mode_lecture_seule():
+        # Inutile d'exposer au LLM des outils qui seraient refusés.
+        for outil in mcp._tool_manager.list_tools():
+            if getattr(outil.fn, "outil_ecriture", False):
+                mcp._tool_manager.remove_tool(outil.name)
+
     autorises = projets_autorises()
     logger.info(
         "Serveur prêt - lecture seule : %s - projets autorisés : %s",

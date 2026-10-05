@@ -57,6 +57,20 @@ claude mcp add dataiku-factory \
     -- python scripts/mcp_server.py
 ```
 
+### Chat with your own LLM (vLLM / OpenAI-compatible)
+
+Set `VLLM_BASE_URL`, `VLLM_MODEL` and `OPENAI_API_KEY` in `.env`, then:
+
+```bash
+python scripts/chat_llm.py                       # interactive chat
+python scripts/chat_llm.py -q "List the final datasets of project MY_PROJECT"
+```
+
+The chat starts the MCP server, gives its tools to the LLM and runs the
+tool calls it asks for. By default only read-only tools are exposed
+(`CHAT_READ_ONLY=true`). The vLLM server must be started with
+`--enable-auto-tool-choice --tool-call-parser hermes` (Qwen) for tool calling.
+
 ## 📚 MCP Tool Catalog
 
 ### Core Recipe Management Tools
