@@ -28,7 +28,7 @@ import httpx
 from dotenv import load_dotenv
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from openai import APIStatusError, AsyncOpenAI
+from openai import APIConnectionError, APIStatusError, AsyncOpenAI
 
 RACINE = Path(__file__).resolve().parent.parent
 load_dotenv(RACINE / ".env")
@@ -58,7 +58,12 @@ def _creer_client_llm() -> tuple[AsyncOpenAI, str]:
     if not base_url or not modele:
         sys.exit("VLLM_BASE_URL et VLLM_MODEL doivent être définis dans .env")
 
-    verify = not _vrai(os.environ.get("VLLM_INSECURE_TLS"), False)
+    # Certificat d'entreprise : VLLM_CA_BUNDLE=/chemin/ca.pem (recommandé)
+    # ou VLLM_INSECURE_TLS=true (désactive la vérification).
+    verify: bool | str = not _vrai(os.environ.get("VLLM_INSECURE_TLS"), False)
+    ca_bundle = os.environ.get("VLLM_CA_BUNDLE", "").strip()
+    if verify and ca_bundle:
+        verify = ca_bundle
     client = AsyncOpenAI(
         base_url=base_url,
         api_key=os.environ.get("OPENAI_API_KEY", "EMPTY"),
@@ -193,6 +198,15 @@ async def main() -> None:
                     texte = await _repondre(
                         llm, modele, session, outils, messages
                     )
+                except APIConnectionError as exc:
+                    texte = f"Impossible de joindre le LLM : {exc.__cause__ or exc}"
+                    if "CERTIFICATE_VERIFY_FAILED" in str(exc.__cause__):
+                        texte += (
+                            "\n→ Certificat TLS non reconnu : renseigne "
+                            "VLLM_CA_BUNDLE=/chemin/vers/ca.pem dans .env, "
+                            "ou VLLM_INSECURE_TLS=true."
+                        )
+                    del messages[taille_historique:]
                 except APIStatusError as exc:
                     texte = f"Erreur API LLM ({exc.status_code}) : {exc.message}"
                     if "tool" in str(exc.message).lower():
