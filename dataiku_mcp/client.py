@@ -62,8 +62,9 @@ def _create_client() -> dataikuapi.DSSClient:
         
         return client
         
-    except Exception as e:
-        raise ConnectionError(f"Failed to connect to DSS at {dss_host}: {e}")
+    except Exception as exc:
+        raise ConnectionError(f"Failed to connect to DSS at {dss_host}: {exc}"
+                              )from exc
 
 
 def reset_client():
@@ -72,7 +73,6 @@ def reset_client():
     """
     global _CLIENT_INSTANCE
     _CLIENT_INSTANCE = None
-
 
 def get_project(project_key: str) -> dataikuapi.dss.project.DSSProject:
     """

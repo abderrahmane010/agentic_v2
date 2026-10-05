@@ -1,0 +1,19 @@
+from pprint import pprint
+
+from dataiku_mcp.tools.classification_dataset import (
+    _classer_datasets_flow_interne,
+)
+
+
+def main() -> None:
+    project_key = "TA_CLE_PROJET_DATAIKU"
+
+    resultat = _classer_datasets_flow_interne(
+        project_key
+    )
+
+    pprint(resultat)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import dataiku
+import datauri
 import pandas as pd
 import requests
 import os
@@ -15,7 +15,6 @@ password = os.environ.get("KNOX_PASSWORD")  # depuis ton profil
 # variables = dataiku.get_custom_variables()
 # username = variables.get("knox_user")
 # password = variables.get("knox_password")
-
 # Appel API Knox
 response = requests.get(
     KNOX_URL,

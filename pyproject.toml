@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "dataiku-api-client==14.0.0",
+    "langchain>=1.4.3",
     "mcp",
     "pydantic>=2.0.0",
     "python-dotenv",
