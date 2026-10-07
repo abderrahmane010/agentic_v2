@@ -25,6 +25,7 @@ from dataiku_mcp.tools import (
     classification_dataset as flow_classification,
     code_development,
     datasets,
+    dependances_projets,
     environment_config,
     monitoring_debug,
     productivity,
@@ -581,6 +582,28 @@ def get_dataset_sample(
     )
  
  
+@mcp.tool()
+@outil_securise()
+def dependances_inter_projets(
+    project_key: Optional[str] = None,
+    inclure_scenarios: bool = True,
+    details: bool = False,
+) -> Dict[str, Any]:
+    """Dependencies BETWEEN Dataiku projects (which project uses data of
+    which other project), cycles and proposed migration waves.
+    Use it to plan a migration (e.g. to Databricks).
+
+    Args:
+        project_key: Optional. Focus on one project (its providers,
+            consumers, prerequisites and wave). Omit for the whole instance.
+        inclure_scenarios: Also analyse scenarios (slower)
+        details: Return every object of each link and unused shares
+    """
+    return dependances_projets.dependances_inter_projets(
+        project_key, inclure_scenarios, details
+    )
+
+
 # ===========================================================================
 # Environment configuration tools
 # ===========================================================================

@@ -66,6 +66,14 @@ python scripts/chat_llm.py                       # interactive chat
 python scripts/chat_llm.py -q "List the final datasets of project MY_PROJECT"
 ```
 
+Direct commands (no LLM, complete output):
+
+- `/tables PROJECT` – datasets classified as source / intermediate / final
+- `/dependances` – dependencies between all projects, cycles and proposed
+  migration waves; writes a Markdown report with a Mermaid graph to `rapports/`
+- `/dependances PROJECT` – providers, consumers and migration prerequisites
+  of one project
+
 The chat starts the MCP server, gives its tools to the LLM and runs the
 tool calls it asks for. By default only read-only tools are exposed
 (`CHAT_READ_ONLY=true`). The vLLM server must be started with
