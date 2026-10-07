@@ -57,6 +57,33 @@ claude mcp add dataiku-factory \
     -- python scripts/mcp_server.py
 ```
 
+### Chat with your own LLM (vLLM / OpenAI-compatible)
+
+Set `VLLM_BASE_URL`, `VLLM_MODEL` and `OPENAI_API_KEY` in `.env`, then:
+
+```bash
+python scripts/chat_llm.py                       # interactive chat
+python scripts/chat_llm.py -q "List the final datasets of project MY_PROJECT"
+```
+
+Direct commands (no LLM, complete output):
+
+- `/tables PROJECT` – datasets classified as source / intermediate / final
+- `/dependances` – dependencies between all projects, cycles and proposed
+  migration waves; writes a Markdown report with a Mermaid graph to `rapports/`
+- `/dependances PROJECT` – providers, consumers and migration prerequisites
+  of one project
+- `/migration PROJECT` – technical inventory before a Databricks migration:
+  storage (HDFS/Hive...), recipe engines, Cloudera-specific code (hdfs://,
+  Kerberos, Hive SQL...), plugins and a complexity score; writes a Markdown
+  report and Excel-friendly CSV files to `rapports/`
+- `/migration` – the same summary for every project, sorted by complexity
+
+The chat starts the MCP server, gives its tools to the LLM and runs the
+tool calls it asks for. By default only read-only tools are exposed
+(`CHAT_READ_ONLY=true`). The vLLM server must be started with
+`--enable-auto-tool-choice --tool-call-parser hermes` (Qwen) for tool calling.
+
 ## 📚 MCP Tool Catalog
 
 ### Core Recipe Management Tools

@@ -111,6 +111,8 @@ def outil_securise(
                 logger.warning("Outil %s refusé : %s", nom, exc)
                 return {"success": False, "error": str(exc)}
 
+        # Permet au serveur de masquer les outils d'écriture en lecture seule.
+        wrapper.outil_ecriture = ecriture  # type: ignore[attr-defined]
         return wrapper
 
     return decorateur

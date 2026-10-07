@@ -3,10 +3,24 @@ from typing import Any
 from dataiku_mcp.client import get_project
 
 
+_CATEGORIES = (
+    "tables_sources",
+    "tables_intermediaires",
+    "tables_finales",
+    "tables_isolees",
+)
+
+
 def classer_datasets_flow(
     project_key: str,
+    details: bool = False,
 ) -> dict[str, Any]:
-    """Classe publiquement les datasets selon leur position dans le Flow."""
+    """Classe publiquement les datasets selon leur position dans le Flow.
+
+    Par défaut le résultat est compact (nom, type, connexion par dataset),
+    adapté à un LLM. ``details=True`` renvoie aussi les recettes
+    productrices/consommatrices, les explications et les avertissements.
+    """
     if not isinstance(project_key, str):
         raise TypeError(
             "project_key doit être une chaîne de caractères, "
@@ -20,7 +34,45 @@ def classer_datasets_flow(
             "project_key ne doit pas être vide"
         )
 
-    return _classer_datasets_flow_interne(project_key)
+    resultat = _classer_datasets_flow_interne(project_key)
+
+    if details:
+        return resultat
+
+    return _compacter(resultat)
+
+
+def _compacter(resultat: dict[str, Any]) -> dict[str, Any]:
+    """Ne garde que l'essentiel de la classification."""
+    compact: dict[str, Any] = {
+        "projet": resultat["projet"],
+        "statistiques": resultat["statistiques"],
+    }
+
+    for categorie in _CATEGORIES:
+        compact[categorie] = [
+            {
+                "nom": dataset["nom"],
+                "type": dataset.get("type"),
+                "connexion": dataset.get("connexion"),
+            }
+            for dataset in resultat[categorie]
+        ]
+
+    if resultat.get("autres_objets_flow"):
+        compact["autres_objets_flow"] = [
+            {"nom": o["nom"], "type": o["type"]}
+            for o in resultat["autres_objets_flow"]
+        ]
+
+    if resultat.get("erreurs_flow"):
+        compact["erreurs_flow"] = resultat["erreurs_flow"]
+
+    compact["note"] = (
+        "Classification topologique basée sur les dépendances visibles "
+        "dans le Flow (pas forcément le sens métier)."
+    )
+    return compact
 
 
 def _classer_datasets_flow_interne(
@@ -109,6 +161,19 @@ def _classer_datasets_flow_interne(
                 "recettes_consommant"
             ].append(recette_name)
 
+    autres_objets = sorted(
+        (
+            {
+                "nom": n.get("nom"),
+                "identifiant": n.get("identifiant"),
+                "type": n.get("type"),
+            }
+            for n in flow.get("noeuds", [])
+            if n.get("categorie") == "objet"
+        ),
+        key=lambda o: (str(o["type"]), str(o["nom"]).lower()),
+    )
+
     tables_sources: list[dict] = []
     tables_intermediaires: list[dict] = []
     tables_finales: list[dict] = []
@@ -193,6 +258,7 @@ def _classer_datasets_flow_interne(
         "tables_intermediaires": tables_intermediaires,
         "tables_finales": tables_finales,
         "tables_isolees": tables_isolees,
+        "autres_objets_flow": autres_objets,
         "erreurs_flow": flow.get("erreurs", []),
         "avertissements": [
             (
@@ -243,6 +309,83 @@ def _as_dict(item: Any) -> dict[str, Any]:
         "type": getattr(item, "type", None),
     }
 
+
+def _noeud_objet(
+    ref: str,
+    noeuds: dict[str, dict[str, Any]],
+    autres_objets: dict[str, tuple[str, str]],
+    project_key: str,
+) -> str:
+    """Retourne l'identifiant de noeud d'une entrée/sortie de recette.
+
+    - dataset du projet : noeud déjà créé depuis list_datasets ;
+    - dataset partagé depuis un autre projet ("PROJET.dataset") ;
+    - autre objet du Flow (dossier géré, modèle, evaluation store...),
+      référencé par son identifiant : ce n'est pas un dataset.
+    """
+    noeud_id = f"dataset:{ref}"
+    if noeud_id in noeuds:
+        return noeud_id
+
+    if "." in ref and ref.split(".", 1)[0] != project_key:
+        noeuds[noeud_id] = {
+            "id": noeud_id,
+            "nom": ref,
+            "categorie": "dataset",
+            "type": f"Partagé depuis {ref.split('.', 1)[0]}",
+            "connexion": None,
+        }
+        return noeud_id
+
+    nom, type_objet = autres_objets.get(ref, (ref, "Objet non identifié"))
+    noeud_id = f"objet:{ref}"
+    noeuds.setdefault(
+        noeud_id,
+        {
+            "id": noeud_id,
+            "nom": nom,
+            "identifiant": ref,
+            "categorie": "objet",
+            "type": type_objet,
+            "connexion": None,
+        },
+    )
+    return noeud_id
+
+
+def _lister_autres_objets(project: Any) -> dict[str, tuple[str, str]]:
+    """Objets du Flow qui ne sont pas des datasets : identifiant -> (nom, type)."""
+    objets: dict[str, tuple[str, str]] = {}
+    sources = (
+        ("list_managed_folders", "Dossier géré"),
+        ("list_saved_models", "Modèle enregistré"),
+        ("list_model_evaluation_stores", "Model evaluation store"),
+        ("list_streaming_endpoints", "Streaming endpoint"),
+        ("list_knowledge_banks", "Knowledge bank"),
+    )
+
+    for methode, libelle in sources:
+        lister = getattr(project, methode, None)
+        if lister is None:
+            continue
+        try:
+            elements = lister()
+        except Exception:
+            # Type d'objet absent de cette instance/licence : sans impact,
+            # ses références seront signalées "Objet non identifié".
+            continue
+
+        for element in elements or []:
+            if isinstance(element, dict):
+                identifiant, nom = element.get("id"), element.get("name")
+            else:
+                identifiant = getattr(element, "id", None)
+                nom = getattr(element, "name", None)
+            if identifiant:
+                objets[str(identifiant)] = (nom or str(identifiant), libelle)
+
+    return objets
+
 #----------------------------------------------------------------------------------
 def _cartographier_flow_interne(
     project_key: str,
@@ -276,6 +419,10 @@ def _cartographier_flow_interne(
             "type": brut.get("type"),
             "connexion": params.get("connection"),
         }
+
+    # Autres objets du Flow (dossiers, modèles...) : référencés par leur
+    # identifiant dans les recettes, ce ne sont pas des datasets.
+    autres_objets = _lister_autres_objets(project)
 
     # Création des noeuds recettes et des dépendances.
     for item in project.list_recipes():
@@ -313,17 +460,8 @@ def _cartographier_flow_interne(
                 if not dataset_name:
                     continue
 
-                dataset_id = f"dataset:{dataset_name}"
-
-                noeuds.setdefault(
-                    dataset_id,
-                    {
-                        "id": dataset_id,
-                        "nom": dataset_name,
-                        "categorie": "dataset",
-                        "type": None,
-                        "connexion": None,
-                    },
+                dataset_id = _noeud_objet(
+                    dataset_name, noeuds, autres_objets, project_key
                 )
 
                 aretes.append(
@@ -342,17 +480,8 @@ def _cartographier_flow_interne(
                 if not dataset_name:
                     continue
 
-                dataset_id = f"dataset:{dataset_name}"
-
-                noeuds.setdefault(
-                    dataset_id,
-                    {
-                        "id": dataset_id,
-                        "nom": dataset_name,
-                        "categorie": "dataset",
-                        "type": None,
-                        "connexion": None,
-                    },
+                dataset_id = _noeud_objet(
+                    dataset_name, noeuds, autres_objets, project_key
                 )
 
                 aretes.append(

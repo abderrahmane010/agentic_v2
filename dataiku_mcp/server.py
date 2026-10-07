@@ -25,7 +25,9 @@ from dataiku_mcp.tools import (
     classification_dataset as flow_classification,
     code_development,
     datasets,
+    dependances_projets,
     environment_config,
+    inventaire_migration,
     monitoring_debug,
     productivity,
     project_exploration,
@@ -444,6 +446,72 @@ def get_generated_sql(
 # ===========================================================================
 @mcp.tool()
 @outil_securise()
+def list_dss_projects() -> Dict[str, Any]:
+    """List the keys of all Dataiku projects this server can access."""
+    return {"status": "ok", "projects": filtrer_projets(list_projects())}
+
+
+@mcp.tool()
+@outil_securise()
+def list_datasets(
+    project_key: str,
+    dataset_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    """List ALL dataset names of a project (flat list, not classified).
+    To classify them as source / intermediate / final, use
+    classer_datasets_flow instead.
+
+    Args:
+        project_key: The project key
+        dataset_type: Optional filter on dataset type (e.g. 'HDFS')
+    """
+    resultat = datasets.list_datasets(project_key, dataset_type)
+    if resultat.get("status") != "ok":
+        return resultat
+    # Sortie compacte : le contexte du LLM est limité.
+    return {
+        "status": "ok",
+        "project_key": project_key,
+        "total_count": resultat["total_count"],
+        "datasets": [
+            {"name": d["name"], "type": d["type"], "connection": d["connection"]}
+            for d in resultat["datasets"]
+        ],
+    }
+
+
+@mcp.tool()
+@outil_securise()
+def list_recipes(
+    project_key: str,
+    recipe_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    """List ALL recipes of a project.
+
+    Args:
+        project_key: The project key
+        recipe_type: Optional filter on recipe type (e.g. 'python', 'sql')
+    """
+    return recipes.list_recipes(project_key, recipe_type)
+
+
+@mcp.tool()
+@outil_securise()
+def list_scenarios(
+    project_key: str,
+    active_only: bool = False,
+) -> Dict[str, Any]:
+    """List ALL scenarios of a project.
+
+    Args:
+        project_key: The project key
+        active_only: Only return active scenarios
+    """
+    return scenarios.list_scenarios(project_key, None, active_only)
+
+
+@mcp.tool()
+@outil_securise()
 def get_project_flow(project_key: str) -> Dict[str, Any]:
     """Get complete data flow/pipeline structure.
  
@@ -455,9 +523,13 @@ def get_project_flow(project_key: str) -> Dict[str, Any]:
  
 @mcp.tool()
 @outil_securise()
-def classer_datasets_flow(project_key: str) -> Dict[str, Any]:
-    """Classify the project's datasets by their position in the Flow:
-    sources, intermediates, finals and isolated datasets.
+def classer_datasets_flow(
+    project_key: str,
+    details: bool = False,
+) -> Dict[str, Any]:
+    """List ALL datasets (tables) of a project classified by their position
+    in the Flow: sources, intermediates, finals and isolated datasets.
+    Use this by default when asked for the datasets / tables of a project.
  
     Classification is topological (based on recipe dependencies),
     not necessarily business meaning. Managed folders, models and datasets
@@ -465,8 +537,9 @@ def classer_datasets_flow(project_key: str) -> Dict[str, Any]:
  
     Args:
         project_key: The project key
+        details: Also return producing/consuming recipes for each dataset
     """
-    return flow_classification.classer_datasets_flow(project_key)
+    return flow_classification.classer_datasets_flow(project_key, details)
  
  
 @mcp.tool()
@@ -476,12 +549,13 @@ def search_project_objects(
     search_term: str,
     object_types: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Search for datasets, recipes, scenarios by name/pattern.
+    """Search datasets, recipes, scenarios whose name contains a term.
+    To list everything, prefer list_datasets / list_recipes / list_scenarios.
  
     Args:
         project_key: The project key
-        search_term: Search pattern
-        object_types: List of object types to search
+        search_term: Text or pattern to search (e.g. 'client', '*client*')
+        object_types: Subset of ["datasets", "recipes", "scenarios"]
     """
     return project_exploration.search_project_objects(
         project_key, search_term, object_types
@@ -509,6 +583,50 @@ def get_dataset_sample(
     )
  
  
+@mcp.tool()
+@outil_securise()
+def dependances_inter_projets(
+    project_key: Optional[str] = None,
+    inclure_scenarios: bool = True,
+    details: bool = False,
+) -> Dict[str, Any]:
+    """Dependencies BETWEEN Dataiku projects (which project uses data of
+    which other project), cycles and proposed migration waves.
+    Use it to plan a migration (e.g. to Databricks).
+
+    Args:
+        project_key: Optional. Focus on one project (its providers,
+            consumers, prerequisites and wave). Omit for the whole instance.
+        inclure_scenarios: Also analyse scenarios (slower)
+        details: Return every object of each link and unused shares
+    """
+    return dependances_projets.dependances_inter_projets(
+        project_key, inclure_scenarios, details
+    )
+
+
+@mcp.tool()
+@outil_securise()
+def inventaire_technique_migration(
+    project_key: Optional[str] = None,
+    analyser_code: bool = True,
+    details: bool = False,
+) -> Dict[str, Any]:
+    """Technical inventory before a Cloudera -> Databricks migration:
+    storage (HDFS/Hive...), recipe engines (Hive, Impala, Spark...),
+    Cloudera-specific code (hdfs://, Kerberos, Hive SQL...), plugins and a
+    complexity score (Simple / Moyen / Complexe) with reasons.
+
+    Args:
+        project_key: Optional. One project; omit for a summary of all projects
+        analyser_code: Scan recipe and scenario code (slower)
+        details: Return the per-dataset / per-recipe detail
+    """
+    return inventaire_migration.inventaire_technique_migration(
+        project_key, analyser_code, details
+    )
+
+
 # ===========================================================================
 # Environment configuration tools
 # ===========================================================================
@@ -682,6 +800,12 @@ def get_project_info(project_key: str) -> str:
  
 def create_server() -> FastMCP:
     """Create and configure the MCP server."""
+    if mode_lecture_seule():
+        # Inutile d'exposer au LLM des outils qui seraient refusés.
+        for outil in mcp._tool_manager.list_tools():
+            if getattr(outil.fn, "outil_ecriture", False):
+                mcp._tool_manager.remove_tool(outil.name)
+
     autorises = projets_autorises()
     logger.info(
         "Serveur prêt - lecture seule : %s - projets autorisés : %s",
