@@ -3,12 +3,20 @@ Dataiku DSS client wrapper for MCP integration.
 """
 
 import os
+import warnings
 from typing import Optional
+
 import dataikuapi
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+if os.environ.get("DSS_INSECURE_TLS", "true").lower() == "true":
+    # Vérification TLS désactivée volontairement : on masque l'avertissement.
+    # Fait au chargement du module : le serveur MCP restaure les filtres
+    # d'avertissements après chaque requête (warnings.catch_warnings).
+    warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
 _CLIENT_INSTANCE: Optional[dataikuapi.DSSClient] = None
 
@@ -44,12 +52,6 @@ def _create_client() -> dataikuapi.DSSClient:
     dss_api_key = os.environ.get("DSS_API_KEY")
     insecure_tls = os.environ.get("DSS_INSECURE_TLS", "true").lower() == "true"
     
-    if insecure_tls:
-        # Vérification TLS désactivée volontairement : on évite le bruit.
-        import urllib3
-
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
     if not dss_host:
         raise ValueError("DSS_HOST environment variable is required")
     

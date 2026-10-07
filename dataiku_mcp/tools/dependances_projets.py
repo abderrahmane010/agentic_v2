@@ -58,7 +58,9 @@ def dependances_inter_projets(
     partages: dict[tuple[str, str], set[str]] = defaultdict(set)
     erreurs: list[dict[str, str]] = []
 
-    for cle in projets:
+    for numero, cle in enumerate(projets, start=1):
+        # Visible dans le terminal (stderr) : l'analyse peut être longue.
+        logger.info("Dépendances : projet %d/%d - %s", numero, len(projets), cle)
         try:
             projet = get_project(cle)
         except Exception as exc:
