@@ -158,11 +158,11 @@ async def _afficher_tables(session: ClientSession, commande: str) -> None:
         for element in elements:
             connexion = element.get("connexion") or "-"
             print(f"  - {element['nom']}  [{element.get('type')}, {connexion}]")
-    dossiers = donnees.get("dossiers_geres") or []
-    if dossiers:
-        print(f"\n📁 Dossiers gérés, hors datasets ({len(dossiers)})")
-        for nom in dossiers:
-            print(f"  - {nom}")
+    autres = donnees.get("autres_objets_flow") or []
+    if autres:
+        print(f"\n📁 Autres objets du Flow, hors datasets ({len(autres)})")
+        for objet in autres:
+            print(f"  - {objet['nom']}  [{objet['type']}]")
     for erreur in donnees.get("erreurs_flow", []):
         print(f"\n⚠️  Recette {erreur.get('recette')} : {erreur.get('erreur')}")
 

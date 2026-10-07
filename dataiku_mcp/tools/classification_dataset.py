@@ -59,8 +59,11 @@ def _compacter(resultat: dict[str, Any]) -> dict[str, Any]:
             for dataset in resultat[categorie]
         ]
 
-    if resultat.get("dossiers_geres"):
-        compact["dossiers_geres"] = [d["nom"] for d in resultat["dossiers_geres"]]
+    if resultat.get("autres_objets_flow"):
+        compact["autres_objets_flow"] = [
+            {"nom": o["nom"], "type": o["type"]}
+            for o in resultat["autres_objets_flow"]
+        ]
 
     if resultat.get("erreurs_flow"):
         compact["erreurs_flow"] = resultat["erreurs_flow"]
@@ -158,13 +161,17 @@ def _classer_datasets_flow_interne(
                 "recettes_consommant"
             ].append(recette_name)
 
-    dossiers_geres = sorted(
+    autres_objets = sorted(
         (
-            {"nom": n.get("nom"), "identifiant": n.get("identifiant")}
+            {
+                "nom": n.get("nom"),
+                "identifiant": n.get("identifiant"),
+                "type": n.get("type"),
+            }
             for n in flow.get("noeuds", [])
-            if n.get("categorie") == "dossier"
+            if n.get("categorie") == "objet"
         ),
-        key=lambda d: str(d["nom"]).lower(),
+        key=lambda o: (str(o["type"]), str(o["nom"]).lower()),
     )
 
     tables_sources: list[dict] = []
@@ -251,7 +258,7 @@ def _classer_datasets_flow_interne(
         "tables_intermediaires": tables_intermediaires,
         "tables_finales": tables_finales,
         "tables_isolees": tables_isolees,
-        "dossiers_geres": dossiers_geres,
+        "autres_objets_flow": autres_objets,
         "erreurs_flow": flow.get("erreurs", []),
         "avertissements": [
             (
@@ -306,45 +313,78 @@ def _as_dict(item: Any) -> dict[str, Any]:
 def _noeud_objet(
     ref: str,
     noeuds: dict[str, dict[str, Any]],
-    dossiers: dict[str, str],
+    autres_objets: dict[str, tuple[str, str]],
     project_key: str,
 ) -> str:
     """Retourne l'identifiant de noeud d'une entrée/sortie de recette.
 
-    Crée le noeud s'il n'existe pas : dossier géré, dataset partagé depuis
-    un autre projet ("PROJET.dataset") ou dataset inconnu.
+    - dataset du projet : noeud déjà créé depuis list_datasets ;
+    - dataset partagé depuis un autre projet ("PROJET.dataset") ;
+    - autre objet du Flow (dossier géré, modèle, evaluation store...),
+      référencé par son identifiant : ce n'est pas un dataset.
     """
-    if ref in dossiers:
-        noeud_id = f"dossier:{ref}"
-        noeuds.setdefault(
-            noeud_id,
-            {
-                "id": noeud_id,
-                "nom": dossiers[ref],
-                "identifiant": ref,
-                "categorie": "dossier",
-                "type": "ManagedFolder",
-                "connexion": None,
-            },
-        )
+    noeud_id = f"dataset:{ref}"
+    if noeud_id in noeuds:
         return noeud_id
 
-    noeud_id = f"dataset:{ref}"
-    type_objet = None
     if "." in ref and ref.split(".", 1)[0] != project_key:
-        type_objet = f"Partagé depuis {ref.split('.', 1)[0]}"
+        noeuds[noeud_id] = {
+            "id": noeud_id,
+            "nom": ref,
+            "categorie": "dataset",
+            "type": f"Partagé depuis {ref.split('.', 1)[0]}",
+            "connexion": None,
+        }
+        return noeud_id
 
+    nom, type_objet = autres_objets.get(ref, (ref, "Objet non identifié"))
+    noeud_id = f"objet:{ref}"
     noeuds.setdefault(
         noeud_id,
         {
             "id": noeud_id,
-            "nom": ref,
-            "categorie": "dataset",
+            "nom": nom,
+            "identifiant": ref,
+            "categorie": "objet",
             "type": type_objet,
             "connexion": None,
         },
     )
     return noeud_id
+
+
+def _lister_autres_objets(project: Any) -> dict[str, tuple[str, str]]:
+    """Objets du Flow qui ne sont pas des datasets : identifiant -> (nom, type)."""
+    objets: dict[str, tuple[str, str]] = {}
+    sources = (
+        ("list_managed_folders", "Dossier géré"),
+        ("list_saved_models", "Modèle enregistré"),
+        ("list_model_evaluation_stores", "Model evaluation store"),
+        ("list_streaming_endpoints", "Streaming endpoint"),
+        ("list_knowledge_banks", "Knowledge bank"),
+    )
+
+    for methode, libelle in sources:
+        lister = getattr(project, methode, None)
+        if lister is None:
+            continue
+        try:
+            elements = lister()
+        except Exception:
+            # Type d'objet absent de cette instance/licence : sans impact,
+            # ses références seront signalées "Objet non identifié".
+            continue
+
+        for element in elements or []:
+            if isinstance(element, dict):
+                identifiant, nom = element.get("id"), element.get("name")
+            else:
+                identifiant = getattr(element, "id", None)
+                nom = getattr(element, "name", None)
+            if identifiant:
+                objets[str(identifiant)] = (nom or str(identifiant), libelle)
+
+    return objets
 
 #----------------------------------------------------------------------------------
 def _cartographier_flow_interne(
@@ -380,16 +420,9 @@ def _cartographier_flow_interne(
             "connexion": params.get("connection"),
         }
 
-    # Dossiers gérés (managed folders) : référencés par leur identifiant
-    # dans les recettes, ce ne sont pas des datasets.
-    dossiers: dict[str, str] = {}
-    try:
-        for dossier in project.list_managed_folders():
-            brut = _as_dict(dossier)
-            if brut.get("id"):
-                dossiers[brut["id"]] = brut.get("name") or brut["id"]
-    except Exception as exc:
-        erreurs.append({"recette": "(dossiers gérés)", "erreur": str(exc)})
+    # Autres objets du Flow (dossiers, modèles...) : référencés par leur
+    # identifiant dans les recettes, ce ne sont pas des datasets.
+    autres_objets = _lister_autres_objets(project)
 
     # Création des noeuds recettes et des dépendances.
     for item in project.list_recipes():
@@ -428,7 +461,7 @@ def _cartographier_flow_interne(
                     continue
 
                 dataset_id = _noeud_objet(
-                    dataset_name, noeuds, dossiers, project_key
+                    dataset_name, noeuds, autres_objets, project_key
                 )
 
                 aretes.append(
@@ -448,7 +481,7 @@ def _cartographier_flow_interne(
                     continue
 
                 dataset_id = _noeud_objet(
-                    dataset_name, noeuds, dossiers, project_key
+                    dataset_name, noeuds, autres_objets, project_key
                 )
 
                 aretes.append(
