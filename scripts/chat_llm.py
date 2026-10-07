@@ -34,6 +34,7 @@ from openai import APIConnectionError, APIStatusError, AsyncOpenAI
 # Permet de lancer le script sans installer le package.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from dataiku_mcp import rapports_migration  # noqa: E402
 from dataiku_mcp.tools.dependances_projets import generer_mermaid  # noqa: E402
 
 RACINE = Path(__file__).resolve().parent.parent
@@ -58,6 +59,9 @@ datasets, recettes, scénarios, jobs...).
 - Pour connaître les projets disponibles : list_dss_projects.
 - Pour les liens entre projets, l'ordre ou les vagues de migration :
   dependances_inter_projets.
+- Pour la complexité de migration vers Databricks, les technologies
+  (HDFS, Hive, Impala, Spark) ou le code spécifique Cloudera :
+  inventaire_technique_migration.
 - Réponds en français, de façon concise et structurée."""
 
 
@@ -312,6 +316,74 @@ async def _afficher_dependances(session: ClientSession, commande: str) -> None:
     print(f"\n📄 Rapport complet : {fichier}")
 
 
+_ICONES_GRAVITE = {"haute": "🔴", "moyenne": "🟠", "basse": "🟡"}
+
+
+async def _afficher_migration(session: ClientSession, commande: str) -> None:
+    """Commande /migration [PROJET] : inventaire technique sans LLM.
+
+    Écrit aussi un rapport Markdown et des CSV (Excel) dans rapports/.
+    """
+    morceaux = commande.split()
+    projet = morceaux[1] if len(morceaux) > 1 else None
+    print("⏳ Inventaire en cours (lecture du code de chaque recette)...")
+
+    arguments: dict[str, Any] = {"details": True}
+    if projet:
+        arguments["project_key"] = projet
+
+    resultat = await session.call_tool("inventaire_technique_migration", arguments)
+    texte = "\n".join(
+        getattr(b, "text", "") for b in resultat.content
+        if getattr(b, "type", None) == "text"
+    )
+    try:
+        donnees = json.loads(texte)
+    except ValueError:
+        print(texte)
+        return
+
+    if donnees.get("error") or donnees.get("success") is False:
+        print(f"Erreur : {donnees.get('error') or donnees}")
+        return
+
+    dossier = RACINE / "rapports"
+
+    if projet:
+        print(f"\nProjet {projet} — complexité {donnees['complexite']} "
+              f"(score {donnees['score']})")
+        for raison in donnees["raisons"]:
+            print(f"  • {raison}")
+        st, rc = donnees["stockage"], donnees["recettes"]
+        print(f"\n💾 {st['total']} datasets : "
+              + ", ".join(f"{k} {v}" for k, v in st["par_categorie"].items()))
+        print(f"⚙️  {rc['total']} recettes : "
+              + ", ".join(f"{k} {v}" for k, v in rc["par_moteur"].items()))
+        if rc["plugins"]:
+            print(f"🧩 Plugins : {', '.join(rc['plugins'])}")
+        print("\n🔎 Adhérences Cloudera dans le code :")
+        if not donnees["adherences_cloudera"]:
+            print("  aucune détectée")
+        for adh in donnees["adherences_cloudera"]:
+            objets = ", ".join(o.split(":", 1)[1] for o in adh["objets"][:5])
+            suite = "..." if len(adh["objets"]) > 5 else ""
+            print(f"  {_ICONES_GRAVITE[adh['gravite']]} {adh['libelle']} "
+                  f"— {objets}{suite}")
+        fichiers = rapports_migration.rapport_projet(donnees, dossier)
+    else:
+        stats = donnees["statistiques"]
+        print(f"\n{stats['nb_projets']} projets : {stats['complexes']} complexes, "
+              f"{stats['moyens']} moyens, {stats['simples']} simples\n")
+        for p in donnees["projets"]:
+            print(f"  {p['complexite']:<9} {p['score']:>4}  {p['projet']}")
+        fichiers = rapports_migration.rapport_instance(donnees, dossier)
+
+    _afficher_erreurs_lecture(donnees.get("erreurs") or [])
+    print("\n📄 Rapports :")
+    for fichier in fichiers:
+        print(f"  {fichier}")
+
+
 async def _repondre(
     llm: AsyncOpenAI,
     modele: str,
@@ -400,7 +472,7 @@ async def main() -> None:
                     try:
                         question = input(
                             "\n🧑 Toi (/tables PROJET, /dependances [PROJET], "
-                            "exit pour quitter) : "
+                            "/migration [PROJET], exit pour quitter) : "
                         ).strip()
                     except (EOFError, KeyboardInterrupt):
                         break
@@ -415,6 +487,10 @@ async def main() -> None:
 
                 if question.startswith("/dependances"):
                     await _afficher_dependances(session, question)
+                    continue
+
+                if question.startswith("/migration"):
+                    await _afficher_migration(session, question)
                     continue
 
                 taille_historique = len(messages)

@@ -73,6 +73,11 @@ Direct commands (no LLM, complete output):
   migration waves; writes a Markdown report with a Mermaid graph to `rapports/`
 - `/dependances PROJECT` – providers, consumers and migration prerequisites
   of one project
+- `/migration PROJECT` – technical inventory before a Databricks migration:
+  storage (HDFS/Hive...), recipe engines, Cloudera-specific code (hdfs://,
+  Kerberos, Hive SQL...), plugins and a complexity score; writes a Markdown
+  report and Excel-friendly CSV files to `rapports/`
+- `/migration` – the same summary for every project, sorted by complexity
 
 The chat starts the MCP server, gives its tools to the LLM and runs the
 tool calls it asks for. By default only read-only tools are exposed

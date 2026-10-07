@@ -27,6 +27,7 @@ from dataiku_mcp.tools import (
     datasets,
     dependances_projets,
     environment_config,
+    inventaire_migration,
     monitoring_debug,
     productivity,
     project_exploration,
@@ -601,6 +602,28 @@ def dependances_inter_projets(
     """
     return dependances_projets.dependances_inter_projets(
         project_key, inclure_scenarios, details
+    )
+
+
+@mcp.tool()
+@outil_securise()
+def inventaire_technique_migration(
+    project_key: Optional[str] = None,
+    analyser_code: bool = True,
+    details: bool = False,
+) -> Dict[str, Any]:
+    """Technical inventory before a Cloudera -> Databricks migration:
+    storage (HDFS/Hive...), recipe engines (Hive, Impala, Spark...),
+    Cloudera-specific code (hdfs://, Kerberos, Hive SQL...), plugins and a
+    complexity score (Simple / Moyen / Complexe) with reasons.
+
+    Args:
+        project_key: Optional. One project; omit for a summary of all projects
+        analyser_code: Scan recipe and scenario code (slower)
+        details: Return the per-dataset / per-recipe detail
+    """
+    return inventaire_migration.inventaire_technique_migration(
+        project_key, analyser_code, details
     )
 
 
