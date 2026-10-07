@@ -239,6 +239,18 @@ def _rapport_dependances_markdown(donnees: dict[str, Any]) -> str:
     return "\n".join(lignes)
 
 
+
+def _afficher_erreurs_lecture(erreurs: list[dict[str, str]]) -> None:
+    """Signale les objets illisibles : sans eux le résultat peut être incomplet."""
+    if not erreurs:
+        print("\n✅ Tous les projets ont été lus sans erreur.")
+        return
+    print(f"\n⚠️  {len(erreurs)} erreur(s) de lecture, résultat possiblement incomplet :")
+    for erreur in erreurs[:20]:
+        print(f"  - {erreur.get('projet')} : {erreur.get('erreur')}")
+    if len(erreurs) > 20:
+        print(f"  ... et {len(erreurs) - 20} autre(s) (voir le rapport complet)")
+
 async def _afficher_dependances(session: ClientSession, commande: str) -> None:
     """Commande /dependances [PROJET] : dépendances inter-projets sans LLM.
 
@@ -281,6 +293,7 @@ async def _afficher_dependances(session: ClientSession, commande: str) -> None:
         print(f"\n📋 À migrer avant : {', '.join(prerequis) or 'aucun'}")
         if donnees.get("cycle"):
             print(f"🔁 Cycle, à migrer ensemble : {' ↔ '.join(donnees['cycle'])}")
+        _afficher_erreurs_lecture(donnees.get("erreurs") or [])
         return
 
     stats = donnees["statistiques"]
@@ -290,6 +303,7 @@ async def _afficher_dependances(session: ClientSession, commande: str) -> None:
         print(f"  Vague {vague['vague']} : {', '.join(vague['projets'])}")
     for cycle in donnees["cycles"]:
         print(f"  🔁 Cycle : {' ↔ '.join(cycle)}")
+    _afficher_erreurs_lecture(donnees.get("erreurs") or [])
 
     dossier = RACINE / "rapports"
     dossier.mkdir(exist_ok=True)
