@@ -98,3 +98,20 @@ def test_get_generated_sql_visual(dss):
     result = code_development.get_generated_sql("PROJ", "join_out")
     assert result["status"] == "ok", result
     assert result["recipe_info"]["outputs"] == ["out"]
+
+
+def test_visual_recipe_with_empty_payload(dss):
+    dss.state["recipes"]["join_out"]["payload"] = ""
+    code = code_development.get_recipe_code("PROJ", "join_out")
+    assert code["status"] == "ok", code
+    export = productivity.export_project_config("PROJ")
+    assert "warnings" not in export, export.get("warnings")
+    recipes = {r["name"]: r for r in export["config"]["recipes"]}
+    assert recipes["join_out"]["payload"] is None
+
+
+def test_visual_recipe_with_non_json_payload(dss):
+    dss.state["recipes"]["join_out"]["payload"] = "not json"
+    export = productivity.export_project_config("PROJ")
+    recipes = {r["name"]: r for r in export["config"]["recipes"]}
+    assert recipes["join_out"]["payload"] == "not json"

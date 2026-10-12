@@ -10,7 +10,13 @@ import yaml
 
 from dataiku_mcp.client import get_project
 from dataiku_mcp.tools import datasets, recipes, scenarios
-from dataiku_mcp.tools._common import CODE_RECIPE_TYPES, error, flat_refs, ok
+from dataiku_mcp.tools._common import (
+    CODE_RECIPE_TYPES,
+    error,
+    flat_refs,
+    ok,
+    recipe_payload,
+)
 from dataiku_mcp.tools.environment_config import _is_sensitive, _mask
 
 DUPLICATION_MODES = ("MINIMAL", "SHARING", "FULL", "NONE")
@@ -159,7 +165,7 @@ def export_project_config(
                 if settings.type in CODE_RECIPE_TYPES:
                     entry["code"] = settings.str_payload
                 else:
-                    entry["payload"] = settings.obj_payload
+                    entry["payload"] = recipe_payload(settings)
             except Exception as e:
                 warnings.append(f"Recipe {name}: {e}")
             config["recipes"].append(entry)

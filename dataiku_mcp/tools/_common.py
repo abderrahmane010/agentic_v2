@@ -166,3 +166,18 @@ def trigger_summary(trigger: dict[str, Any], index: int) -> dict[str, Any]:
     if datasets:
         summary["datasets"] = datasets
     return summary
+
+
+def recipe_payload(settings: Any) -> Any:
+    """Payload d'une recette visuelle : dict si JSON, sinon texte brut.
+
+    Certaines recettes (sync, export...) ont un payload vide ou non JSON,
+    sur lequel obj_payload lève une erreur de décodage.
+    """
+    raw = settings.str_payload
+    if not raw or not raw.strip():
+        return None
+    try:
+        return settings.obj_payload
+    except ValueError:
+        return raw
