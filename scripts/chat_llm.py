@@ -12,7 +12,7 @@ Variables d'environnement (.env) :
                        (défaut : true)
 
 Usage :
-    python scripts/chat_llm.py
+    python scripts/chat_llm.py               (puis /aide pour les commandes)
     python scripts/chat_llm.py --question "Quelles sont les tables finales du projet X ?"
 """
 
@@ -62,6 +62,26 @@ datasets, recettes, scénarios, jobs...).
 - Pour la complexité de migration vers Databricks, les technologies
   (HDFS, Hive, Impala, Spark) ou le code spécifique Cloudera :
   inventaire_technique_migration.
+- Détail d'un dataset (connexion, chemin/table, partitionnement, dernier
+  build) : get_dataset_info ; colonnes : inspect_dataset_schema ;
+  volumétrie / métriques : check_dataset_metrics ; aperçu des données :
+  get_dataset_sample.
+- Détail d'une recette (type, entrées/sorties, moteur) : get_recipe_info ;
+  son code : get_recipe_code ; SQL d'une recette visuelle :
+  get_generated_sql.
+- Planification et déclencheurs d'un scénario, dernier et prochain run :
+  get_scenario_info ; historique des runs : get_scenario_run_history ;
+  étapes et code : get_scenario_steps ; cause d'un échec :
+  get_scenario_logs.
+- Exécutions récentes ou échecs d'un projet : get_recent_runs (option
+  status_filter="FAILED") ; détail et log d'un job : get_job_details.
+- Connexions, environnements de code, variables : get_connections,
+  get_code_environments, get_project_variables.
+- Graphe complet du Flow : get_project_flow ; recherche par nom :
+  search_project_objects ; configuration complète d'un projet :
+  export_project_config.
+- Si un outil renvoie "status": "error", explique le message à
+  l'utilisateur au lieu d'inventer une réponse.
 - Réponds en français, de façon concise et structurée."""
 
 
@@ -384,6 +404,231 @@ async def _afficher_migration(session: ClientSession, commande: str) -> None:
         print(f"  {fichier}")
 
 
+# ---------------------------------------------------------------------------
+# Commandes directes (sans LLM) sur les outils de base
+# ---------------------------------------------------------------------------
+AIDE = """Commandes directes (sans LLM, sortie complète) :
+  /projets                       projets DSS accessibles
+  /tables PROJET                 datasets classés source / intermédiaire / final
+  /scenarios PROJET              scénarios, déclencheurs, dernier et prochain run
+  /echecs PROJET                 exécutions en échec récentes (scénarios et jobs)
+  /logs PROJET SCENARIO [RUN]    étapes et première erreur d'un run de scénario
+  /connexions [PROJET]           connexions DSS (et leur usage par le projet)
+  /export PROJET                 configuration complète du projet -> rapports/
+  /dependances [PROJET]          dépendances inter-projets et vagues de migration
+  /migration [PROJET]            inventaire technique avant migration Databricks
+  /outils                        outils disponibles pour le LLM
+  /aide                          cette aide
+  exit                           quitter
+Toute autre saisie est envoyée au LLM."""
+
+
+async def _appeler(
+    session: ClientSession, outil: str, arguments: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Appelle un outil MCP ; affiche l'erreur et renvoie None si échec."""
+    resultat = await session.call_tool(outil, arguments)
+    texte = "\n".join(
+        getattr(b, "text", "") for b in resultat.content
+        if getattr(b, "type", None) == "text"
+    )
+    try:
+        donnees = json.loads(texte)
+    except ValueError:
+        print(texte)
+        return None
+    if not isinstance(donnees, dict):
+        return {"resultat": donnees}
+    if donnees.get("status") == "error" or donnees.get("error"):
+        print(f"Erreur : {donnees.get('message') or donnees.get('error')}")
+        return None
+    return donnees
+
+
+def _argument(commande: str, position: int, usage: str) -> str | None:
+    morceaux = commande.split()
+    if len(morceaux) <= position:
+        print(f"Usage : {usage}")
+        return None
+    return morceaux[position]
+
+
+def _date(valeur: str | None) -> str:
+    """ISO 8601 -> 'JJ/MM/AAAA HH:MM' (UTC)."""
+    if not valeur:
+        return "-"
+    try:
+        return datetime.fromisoformat(valeur).strftime("%d/%m/%Y %H:%M")
+    except ValueError:
+        return valeur
+
+
+def _decrire_trigger(trigger: dict[str, Any]) -> str:
+    etat = "" if trigger.get("active") else " (inactif)"
+    if trigger.get("type") == "temporal":
+        heure = ""
+        if trigger.get("hour") is not None:
+            heure = f" à {trigger['hour']:02d}:{trigger.get('minute') or 0:02d}"
+        return (f"planifié {trigger.get('frequency') or ''}{heure}"
+                f" ({trigger.get('timezone') or 'SERVER'}){etat}")
+    if trigger.get("datasets"):
+        return f"sur modification de {', '.join(trigger['datasets'])}{etat}"
+    return f"{trigger.get('type')} {trigger.get('name') or ''}{etat}"
+
+
+async def _afficher_projets(session: ClientSession, commande: str) -> None:
+    donnees = await _appeler(session, "list_dss_projects", {})
+    if donnees:
+        print(f"\n{len(donnees['projects'])} projets :")
+        for cle in donnees["projects"]:
+            print(f"  - {cle}")
+
+
+async def _afficher_scenarios(session: ClientSession, commande: str) -> None:
+    projet = _argument(commande, 1, "/scenarios PROJET")
+    if not projet:
+        return
+    donnees = await _appeler(session, "list_scenarios", {"project_key": projet})
+    if not donnees:
+        return
+    print(f"\nProjet {projet} — {donnees['total_count']} scénario(s)")
+    for sc in donnees["scenarios"]:
+        etat = "✅ actif" if sc["active"] else "⏸️  inactif"
+        print(f"\n  {sc['id']} — {sc['name']} [{sc['type']}, {etat}]")
+        for trigger in sc["triggers"]:
+            print(f"     ⏰ {_decrire_trigger(trigger)}")
+        info = await _appeler(
+            session, "get_scenario_info",
+            {"project_key": projet, "scenario_id": sc["id"]},
+        )
+        if info:
+            dernier = info["scenario_info"].get("last_run") or {}
+            print(f"     dernier run : {dernier.get('outcome') or '-'} "
+                  f"le {_date(dernier.get('start_time'))}"
+                  f" — prochain : {_date(info['scenario_info'].get('next_run'))}")
+    for avertissement in donnees.get("warnings", []):
+        print(f"\n⚠️  {avertissement}")
+
+
+async def _afficher_echecs(session: ClientSession, commande: str) -> None:
+    projet = _argument(commande, 1, "/echecs PROJET")
+    if not projet:
+        return
+    donnees = await _appeler(
+        session, "get_recent_runs", {"project_key": projet, "limit": 100}
+    )
+    if not donnees:
+        return
+    resume = donnees["summary"]
+    taux = resume.get("success_rate")
+    print(f"\nProjet {projet} — {resume['total_runs']} exécutions récentes, "
+          f"{resume['failed_runs']} en échec"
+          + (f", {taux} % de réussite" if taux is not None else ""))
+    echecs = donnees["recent_failures"]
+    if not echecs:
+        print("✅ Aucun échec récent.")
+        return
+    for run in echecs:
+        print(f"  ❌ {run['kind']:<8} {run['name'] or run['id']} — {run['outcome']} "
+              f"le {_date(run.get('start_time'))}")
+    print("\n→ Cause d'un échec de scénario : /logs PROJET SCENARIO")
+
+
+async def _afficher_logs(session: ClientSession, commande: str) -> None:
+    morceaux = commande.split()
+    if len(morceaux) < 3:
+        print("Usage : /logs PROJET SCENARIO [RUN_ID]")
+        return
+    arguments: dict[str, Any] = {
+        "project_key": morceaux[1],
+        "scenario_id": morceaux[2],
+        "max_chars": 3000,
+    }
+    if len(morceaux) > 3:
+        arguments["run_id"] = morceaux[3]
+    donnees = await _appeler(session, "get_scenario_logs", arguments)
+    if not donnees:
+        return
+    run = donnees.get("run_info")
+    if not run:
+        print(donnees.get("message", "Aucun run."))
+        return
+    print(f"\nRun {run['run_id']} — {run['outcome'] or 'en cours'} "
+          f"le {_date(run.get('start_time'))} ({run.get('duration_seconds')} s)")
+    for etape in donnees["steps"]:
+        icone = "✅" if etape["outcome"] in ("SUCCESS", "WARNING") else "❌"
+        print(f"  {icone} {etape['name']} [{etape['type']}] {etape['outcome']}")
+    erreur = donnees.get("first_error")
+    if erreur:
+        print(f"\n🔴 Première erreur : {erreur.get('message') or erreur}")
+    for job in donnees.get("job_logs", []):
+        lignes = [ligne for ligne in (job["log"] or "").splitlines() if ligne.strip()]
+        print(f"\n📄 Fin du log du job {job['job_id']} :")
+        for ligne in lignes[-15:]:
+            print(f"    {ligne}")
+
+
+async def _afficher_connexions(session: ClientSession, commande: str) -> None:
+    morceaux = commande.split()
+    arguments = {"project_key": morceaux[1]} if len(morceaux) > 1 else {}
+    donnees = await _appeler(session, "get_connections", arguments)
+    if not donnees:
+        return
+    print(f"\n{donnees['connection_count']} connexions :")
+    for type_connexion, noms in sorted(donnees["connection_types"].items()):
+        print(f"  {type_connexion} ({len(noms)}) : {', '.join(noms)}")
+    usage = donnees.get("project_connection_usage")
+    if usage:
+        print(f"\nUsage par le projet {morceaux[1]} :")
+        for connexion, detail in usage.items():
+            print(f"  {connexion} : {len(detail['datasets'])} dataset(s), "
+                  f"{len(detail['recipes'])} recette(s)")
+    for avertissement in donnees.get("warnings", []):
+        print(f"\n⚠️  {avertissement}")
+
+
+async def _exporter_projet(session: ClientSession, commande: str) -> None:
+    projet = _argument(commande, 1, "/export PROJET")
+    if not projet:
+        return
+    print("⏳ Export de la configuration...")
+    donnees = await _appeler(
+        session, "export_project_config", {"project_key": projet, "export_format": "yaml"}
+    )
+    if not donnees:
+        return
+    dossier = RACINE / "rapports"
+    dossier.mkdir(exist_ok=True)
+    fichier = dossier / f"config_{projet}_{datetime.now():%Y%m%d_%H%M}.yaml"
+    fichier.write_text(donnees["content"], encoding="utf-8")
+    stats = donnees["stats"]
+    print(f"\n{stats['datasets']} datasets, {stats['recipes']} recettes, "
+          f"{stats['scenarios']} scénarios")
+    for avertissement in donnees.get("warnings", []):
+        print(f"⚠️  {avertissement}")
+    print(f"📄 Configuration : {fichier}")
+
+
+def _afficher_outils(outils: list[dict[str, Any]]) -> None:
+    print(f"\n{len(outils)} outils disponibles pour le LLM :")
+    for outil in sorted(outils, key=lambda o: o["function"]["name"]):
+        description = (outil["function"]["description"] or "").strip().splitlines()
+        print(f"  - {outil['function']['name']} : {description[0] if description else ''}")
+
+
+COMMANDES = {
+    "/projets": _afficher_projets,
+    "/tables": _afficher_tables,
+    "/scenarios": _afficher_scenarios,
+    "/echecs": _afficher_echecs,
+    "/logs": _afficher_logs,
+    "/connexions": _afficher_connexions,
+    "/export": _exporter_projet,
+    "/dependances": _afficher_dependances,
+    "/migration": _afficher_migration,
+}
+
+
 async def _repondre(
     llm: AsyncOpenAI,
     modele: str,
@@ -456,6 +701,7 @@ async def main() -> None:
             outils = [_outil_vers_openai(o) for o in outils_mcp]
 
             print(f"✅ Connecté : {modele} — {len(outils)} outils Dataiku")
+            print(AIDE)
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": PROMPT_SYSTEME}
             ]
@@ -471,8 +717,7 @@ async def main() -> None:
                 else:
                     try:
                         question = input(
-                            "\n🧑 Toi (/tables PROJET, /dependances [PROJET], "
-                            "/migration [PROJET], exit pour quitter) : "
+                            "\n🧑 Toi (/aide pour les commandes, exit pour quitter) : "
                         ).strip()
                     except (EOFError, KeyboardInterrupt):
                         break
@@ -481,16 +726,21 @@ async def main() -> None:
                     if not question:
                         continue
 
-                if question.startswith("/tables"):
-                    await _afficher_tables(session, question)
+                commande = question.split()[0].lower() if question.startswith("/") else ""
+                if commande in ("/aide", "/help"):
+                    print(AIDE)
                     continue
-
-                if question.startswith("/dependances"):
-                    await _afficher_dependances(session, question)
+                if commande == "/outils":
+                    _afficher_outils(outils)
                     continue
-
-                if question.startswith("/migration"):
-                    await _afficher_migration(session, question)
+                if commande in COMMANDES:
+                    try:
+                        await COMMANDES[commande](session, question)
+                    except Exception as exc:  # une commande ne doit pas tuer le chat
+                        print(f"Erreur pendant {commande} : {exc}")
+                    continue
+                if commande:
+                    print(f"Commande inconnue : {commande}. Tape /aide.")
                     continue
 
                 taille_historique = len(messages)
