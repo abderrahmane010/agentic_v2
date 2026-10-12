@@ -16,6 +16,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from dataiku_mcp.tools._common import error
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -72,7 +74,8 @@ def outil_securise(
 
     - bloque l'outil en lecture seule si ``ecriture=True`` ;
     - vérifie chaque argument listé dans ``champs_projet`` (s'il est fourni) ;
-    - renvoie une erreur structurée au lieu de lever une exception.
+    - renvoie une erreur structurée ({"status": "error", ...}) au lieu de
+      lever une exception.
 
     La signature de la fonction décorée est conservée (functools.wraps),
     ce qui permet à FastMCP de générer le schéma de l'outil.
@@ -87,13 +90,11 @@ def outil_securise(
 
             if ecriture and mode_lecture_seule():
                 logger.warning("Outil d'écriture bloqué (lecture seule) : %s", nom)
-                return {
-                    "success": False,
-                    "error": (
-                        f"L'outil '{nom}' modifie DSS et le serveur est en "
-                        "lecture seule (DSS_READ_ONLY=true)."
-                    ),
-                }
+                return error(
+                    f"L'outil '{nom}' modifie DSS et le serveur est en "
+                    "lecture seule (DSS_READ_ONLY=true).",
+                    "read_only",
+                )
 
             try:
                 arguments = signature.bind(*args, **kwargs)
@@ -107,9 +108,12 @@ def outil_securise(
                 logger.info("Appel outil : %s", nom)
                 return func(*arguments.args, **arguments.kwargs)
 
-            except (PermissionError, ValueError, TypeError) as exc:
+            except PermissionError as exc:
                 logger.warning("Outil %s refusé : %s", nom, exc)
-                return {"success": False, "error": str(exc)}
+                return error(str(exc), "forbidden")
+            except (ValueError, TypeError) as exc:
+                logger.warning("Outil %s refusé : %s", nom, exc)
+                return error(str(exc), "invalid_argument")
 
         return wrapper
 

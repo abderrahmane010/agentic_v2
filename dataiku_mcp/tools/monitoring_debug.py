@@ -2,423 +2,206 @@
 Debugging and monitoring tools for Dataiku MCP integration.
 """
 
-import json
-from datetime import datetime
-from typing import Dict, Any, List, Optional
-from dataiku_mcp.client import get_client, get_project
+from collections import Counter
+from typing import Any, Optional
+
+from dataiku_mcp.client import get_project
+from dataiku_mcp.tools._common import (
+    JOB_TERMINAL_STATES,
+    error,
+    job_summary,
+    ms_to_iso,
+    ok,
+    scenario_run_summary,
+)
+
+_FAILED = ("FAILED", "ABORTED")
+_SUCCESS = ("SUCCESS", "WARNING", "DONE")
+
+
+def _job_list_entry(job: dict[str, Any]) -> dict[str, Any]:
+    """Normalise an entry of DSSProject.list_jobs()."""
+    base = job.get("baseStatus", job) or {}
+    definition = base.get("def", job.get("def", {})) or {}
+    return {
+        "kind": "job",
+        "id": definition.get("id") or job.get("jobId"),
+        "name": definition.get("name") or definition.get("id"),
+        "outcome": base.get("state") or job.get("state"),
+        "start_time": ms_to_iso(
+            base.get("jobStartTime") or definition.get("initiationTimestamp")
+        ),
+        "end_time": ms_to_iso(base.get("jobEndTime")),
+        "initiator": definition.get("initiator"),
+        "trigger_type": definition.get("type"),
+    }
+
 
 def get_recent_runs(
     project_key: str,
     limit: int = 50,
-    status_filter: Optional[str] = None
-) -> Dict[str, Any]:
+    status_filter: Optional[str] = None,
+) -> dict[str, Any]:
     """
-    Get recent run history across all scenarios/recipes.
-    
+    Get recent scenario runs and jobs of a project, most recent first.
+
     Args:
         project_key: The project key
-        limit: Number of recent runs to retrieve
-        status_filter: Filter by status (SUCCESS, FAILED, etc.)
-        
+        limit: Number of recent runs to return
+        status_filter: Filter by outcome (SUCCESS, WARNING, FAILED, ABORTED,
+            DONE, RUNNING...)
+
     Returns:
         Dict containing recent runs and summary
     """
     try:
         project = get_project(project_key)
-        client = get_client()
-        
-        all_runs = []
-        
-        # Get scenario runs
-        scenarios = project.list_scenarios()
-        for scenario in scenarios:
+        runs: list[dict[str, Any]] = []
+        warnings: list[str] = []
+
+        for scenario in project.list_scenarios():
+            scenario_id = scenario.get("id")
             try:
-                scenario_obj = project.get_scenario(scenario["id"])
-                runs = scenario_obj.get_last_runs(limit=limit)
-                
-                for run in runs:
-                    run_info = {
-                        "type": "scenario",
-                        "object_id": scenario["id"],
-                        "object_name": scenario["name"],
-                        "run_id": run.run_id,
-                        "outcome": run.outcome,
-                        "start_time": run.start_time,
-                        "end_time": run.end_time,
-                        "duration": run.duration,
-                        "trigger_type": getattr(run, 'trigger_type', 'unknown')
-                    }
-                    
-                    # Filter by status if specified
-                    if status_filter is None or run.outcome == status_filter:
-                        all_runs.append(run_info)
-                        
+                for run in project.get_scenario(scenario_id).get_last_runs(limit=limit):
+                    entry = scenario_run_summary(run)
+                    runs.append(
+                        {
+                            "kind": "scenario",
+                            "id": scenario_id,
+                            "name": scenario.get("name"),
+                            **entry,
+                            "outcome": entry["outcome"] or "RUNNING",
+                        }
+                    )
             except Exception as e:
-                continue
-        
-        # Get job runs (from recipes and other activities)
+                warnings.append(f"Scenario {scenario_id}: {e}")
+
         try:
-            jobs = project.list_jobs(limit=limit)
-            for job in jobs:
-                job_info = {
-                    "type": "job",
-                    "object_id": job.job_id,
-                    "object_name": job.job_name if hasattr(job, 'job_name') else f"Job {job.job_id}",
-                    "run_id": job.job_id,
-                    "outcome": job.state,
-                    "start_time": job.start_time if hasattr(job, 'start_time') else None,
-                    "end_time": job.end_time if hasattr(job, 'end_time') else None,
-                    "duration": job.duration if hasattr(job, 'duration') else None,
-                    "trigger_type": "manual"
-                }
-                
-                # Filter by status if specified
-                if status_filter is None or job.state == status_filter:
-                    all_runs.append(job_info)
-                    
+            runs.extend(_job_list_entry(j) for j in project.list_jobs())
         except Exception as e:
-            # Jobs might not be available in all DSS versions
-            pass
-        
-        # Sort by start time (most recent first)
-        all_runs.sort(key=lambda x: x["start_time"] or "", reverse=True)
-        
-        # Limit results
-        if len(all_runs) > limit:
-            all_runs = all_runs[:limit]
-        
-        # Calculate summary statistics
-        total_runs = len(all_runs)
-        success_runs = len([r for r in all_runs if r["outcome"] in ["SUCCESS", "DONE"]])
-        failed_runs = len([r for r in all_runs if r["outcome"] in ["FAILED", "ABORTED"]])
-        running_runs = len([r for r in all_runs if r["outcome"] in ["RUNNING", "PENDING"]])
-        
-        # Calculate average duration for completed runs
-        completed_runs = [r for r in all_runs if r["duration"] and r["outcome"] in ["SUCCESS", "DONE", "FAILED"]]
-        avg_duration = sum(r["duration"] for r in completed_runs) / len(completed_runs) if completed_runs else 0
-        
-        # Group by outcome
-        outcome_summary = {}
-        for run in all_runs:
-            outcome = run["outcome"]
-            if outcome not in outcome_summary:
-                outcome_summary[outcome] = 0
-            outcome_summary[outcome] += 1
-        
-        # Group by type
-        type_summary = {}
-        for run in all_runs:
-            run_type = run["type"]
-            if run_type not in type_summary:
-                type_summary[run_type] = 0
-            type_summary[run_type] += 1
-        
-        # Recent failures analysis
-        recent_failures = [r for r in all_runs if r["outcome"] in ["FAILED", "ABORTED"]][:10]
-        
-        summary = {
-            "total_runs": total_runs,
-            "success_runs": success_runs,
-            "failed_runs": failed_runs,
-            "running_runs": running_runs,
-            "success_rate": (success_runs / total_runs * 100) if total_runs > 0 else 0,
-            "average_duration": avg_duration,
-            "outcome_summary": outcome_summary,
-            "type_summary": type_summary,
-            "recent_failures_count": len(recent_failures)
-        }
-        
-        return {
-            "status": "ok",
-            "project_key": project_key,
-            "runs": all_runs,
-            "recent_failures": recent_failures,
-            "summary": summary,
-            "filters_applied": {
-                "limit": limit,
-                "status_filter": status_filter
-            }
-        }
-        
+            warnings.append(f"Jobs: {e}")
+
+        if status_filter:
+            runs = [r for r in runs if r["outcome"] == status_filter.upper()]
+
+        runs.sort(key=lambda r: r["start_time"] or "", reverse=True)
+        runs = runs[:limit]
+
+        outcomes = Counter(r["outcome"] for r in runs)
+        failed = sum(outcomes[o] for o in _FAILED)
+        success = sum(outcomes[o] for o in _SUCCESS)
+        finished = failed + success
+
+        result = ok(
+            project_key=project_key,
+            runs=runs,
+            recent_failures=[r for r in runs if r["outcome"] in _FAILED][:10],
+            summary={
+                "total_runs": len(runs),
+                "success_runs": success,
+                "failed_runs": failed,
+                "success_rate": round(success / finished * 100, 1)
+                if finished
+                else None,
+                "outcome_summary": dict(outcomes),
+                "kind_summary": dict(Counter(r["kind"] for r in runs)),
+            },
+        )
+        if warnings:
+            result["warnings"] = warnings
+        return result
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to get recent runs: {str(e)}"
-        }
+        return error(f"Failed to get recent runs of '{project_key}': {e}")
 
 
 def get_job_details(
-    project_key: str,
-    job_id: str
-) -> Dict[str, Any]:
+    project_key: str, job_id: str, max_log_chars: int = 20000
+) -> dict[str, Any]:
     """
-    Get detailed job execution information.
-    
+    Get the state, activities and log of a job.
+
     Args:
         project_key: The project key
         job_id: Job identifier
-        
+        max_log_chars: Maximum log size returned (end of the log is kept)
+
     Returns:
-        Dict containing detailed job information
+        Dict with job details or error message
     """
     try:
-        client = get_client()
-        project = get_project(project_key)
-        
-        # Get job details
-        job = client.get_job(job_id)
-        
-        # Extract basic job information
-        job_info = {
-            "job_id": job_id,
-            "job_name": getattr(job, 'job_name', f"Job {job_id}"),
-            "state": job.state,
-            "start_time": getattr(job, 'start_time', None),
-            "end_time": getattr(job, 'end_time', None),
-            "duration": getattr(job, 'duration', None),
-            "initiator": getattr(job, 'initiator', 'unknown'),
-            "type": getattr(job, 'type', 'unknown')
-        }
-        
-        # Get detailed job definition
+        job = get_project(project_key).get_job(job_id)
+        status = job.get_status() or {}
+
+        activities = [
+            {
+                "id": activity_id,
+                "state": (activity or {}).get("state"),
+                "recipe": (activity or {}).get("recipeName"),
+                "target": (activity or {}).get("target"),
+            }
+            for activity_id, activity in (status.get("activities") or {}).items()
+        ]
+
+        log = None
+        log_error = None
         try:
-            job_def = job.get_definition()
-            job_info["definition"] = {
-                "type": job_def.get("type", "unknown"),
-                "projectKey": job_def.get("projectKey", project_key),
-                "params": job_def.get("params", {})
-            }
+            log = job.get_log()
+            if log and len(log) > max_log_chars:
+                log = (
+                    f"[... {len(log) - max_log_chars} chars truncated ...]\n"
+                    + log[-max_log_chars:]
+                )
         except Exception as e:
-            job_info["definition"] = {"error": f"Could not get definition: {str(e)}"}
-        
-        # Get job status
-        try:
-            job_status = job.get_status()
-            job_info["status"] = {
-                "state": job_status.get("state", "unknown"),
-                "progress": job_status.get("progress", 0),
-                "warning": job_status.get("hasWarning", False),
-                "messages": job_status.get("messages", [])
-            }
-        except Exception as e:
-            job_info["status"] = {"error": f"Could not get status: {str(e)}"}
-        
-        # Get job log
-        logs = []
-        try:
-            log_content = job.get_log()
-            if log_content:
-                logs.append({
-                    "type": "main_log",
-                    "content": log_content,
-                    "timestamp": job_info["start_time"]
-                })
-        except Exception as e:
-            logs.append({
-                "type": "error",
-                "content": f"Could not retrieve job log: {str(e)}",
-                "timestamp": job_info["start_time"]
-            })
-        
-        # Get result information if available
-        result_info = {}
-        try:
-            if hasattr(job, 'get_result'):
-                result = job.get_result()
-                result_info = {
-                    "has_result": True,
-                    "result_type": type(result).__name__,
-                    "result_summary": str(result)[:500] if result else "No result"
-                }
-        except Exception as e:
-            result_info = {
-                "has_result": False,
-                "error": f"Could not get result: {str(e)}"
-            }
-        
-        # Get activity information
-        activity_info = {}
-        try:
-            activities = job.get_activities()
-            activity_info = {
-                "activity_count": len(activities),
-                "activities": [
-                    {
-                        "type": activity.get("type", "unknown"),
-                        "name": activity.get("name", "unknown"),
-                        "state": activity.get("state", "unknown"),
-                        "start_time": activity.get("startTime", None),
-                        "end_time": activity.get("endTime", None)
-                    }
-                    for activity in activities[:10]  # Limit to first 10
-                ]
-            }
-        except Exception as e:
-            activity_info = {
-                "activity_count": 0,
-                "error": f"Could not get activities: {str(e)}"
-            }
-        
-        # Get resource usage if available
-        resource_usage = {}
-        try:
-            usage = job.get_resource_usage()
-            resource_usage = {
-                "cpu_time": usage.get("cpuTime", 0),
-                "memory_usage": usage.get("memoryUsage", 0),
-                "disk_usage": usage.get("diskUsage", 0)
-            }
-        except Exception as e:
-            resource_usage = {
-                "error": f"Could not get resource usage: {str(e)}"
-            }
-        
-        # Calculate execution timeline
-        timeline = []
-        if job_info["start_time"]:
-            timeline.append({
-                "event": "job_started",
-                "timestamp": job_info["start_time"],
-                "description": "Job execution started"
-            })
-        
-        if job_info["end_time"]:
-            timeline.append({
-                "event": "job_completed",
-                "timestamp": job_info["end_time"],
-                "description": f"Job completed with status: {job_info['state']}"
-            })
-        
-        return {
-            "status": "ok",
-            "project_key": project_key,
-            "job_info": job_info,
-            "logs": logs,
-            "result_info": result_info,
-            "activity_info": activity_info,
-            "resource_usage": resource_usage,
-            "timeline": timeline,
-            "log_count": len(logs)
-        }
-        
+            log_error = str(e)
+
+        result = ok(
+            job=job_summary(job),
+            activities=activities,
+            log=log,
+        )
+        if log_error:
+            result["warnings"] = [f"Could not retrieve log: {log_error}"]
+        return result
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to get job details: {str(e)}"
-        }
+        return error(f"Failed to get details of job '{job_id}': {e}")
 
 
-def cancel_running_jobs(
-    project_key: str,
-    job_ids: List[str]
-) -> Dict[str, Any]:
+def cancel_running_jobs(project_key: str, job_ids: list[str]) -> dict[str, Any]:
     """
-    Cancel running jobs/scenarios.
-    
+    Abort running jobs.
+
     Args:
         project_key: The project key
-        job_ids: List of job IDs to cancel
-        
+        job_ids: List of job IDs to abort
+
     Returns:
-        Dict containing cancellation results
+        Dict listing aborted jobs and failures
     """
     try:
-        client = get_client()
         project = get_project(project_key)
-        
-        cancelled_jobs = []
-        failed_cancellations = []
-        
-        for job_id in job_ids:
-            try:
-                # Get job first to check if it's cancellable
-                job = client.get_job(job_id)
-                
-                # Check job state
-                job_state = job.state
-                if job_state not in ["RUNNING", "PENDING"]:
-                    failed_cancellations.append({
-                        "job_id": job_id,
-                        "error": f"Job is not running (state: {job_state})",
-                        "current_state": job_state
-                    })
-                    continue
-                
-                # Try to cancel the job
-                job.abort()
-                
-                # Verify cancellation
-                try:
-                    # Wait a moment and check status
-                    import time
-                    time.sleep(1)
-                    
-                    updated_job = client.get_job(job_id)
-                    new_state = updated_job.state
-                    
-                    cancelled_jobs.append({
-                        "job_id": job_id,
-                        "previous_state": job_state,
-                        "new_state": new_state,
-                        "cancelled_successfully": new_state in ["ABORTED", "CANCELLED"],
-                        "job_name": getattr(job, 'job_name', f"Job {job_id}")
-                    })
-                    
-                except Exception as e:
-                    # Cancellation might have worked even if we can't verify
-                    cancelled_jobs.append({
-                        "job_id": job_id,
-                        "previous_state": job_state,
-                        "new_state": "unknown",
-                        "cancelled_successfully": True,
-                        "job_name": getattr(job, 'job_name', f"Job {job_id}"),
-                        "verification_error": str(e)
-                    })
-                
-            except Exception as e:
-                failed_cancellations.append({
-                    "job_id": job_id,
-                    "error": f"Failed to cancel job: {str(e)}"
-                })
-        
-        # Get summary of results
-        successful_cancellations = len([j for j in cancelled_jobs if j.get("cancelled_successfully", False)])
-        failed_count = len(failed_cancellations)
-        
-        # Try to get current running jobs for context
-        current_running_jobs = []
-        try:
-            jobs = project.list_jobs(limit=50)
-            for job in jobs:
-                if job.state in ["RUNNING", "PENDING"]:
-                    current_running_jobs.append({
-                        "job_id": job.job_id,
-                        "job_name": getattr(job, 'job_name', f"Job {job.job_id}"),
-                        "state": job.state,
-                        "start_time": getattr(job, 'start_time', None)
-                    })
-        except Exception:
-            pass
-        
-        cancellation_summary = {
-            "total_requested": len(job_ids),
-            "successful_cancellations": successful_cancellations,
-            "failed_cancellations": failed_count,
-            "success_rate": (successful_cancellations / len(job_ids) * 100) if job_ids else 0,
-            "remaining_running_jobs": len(current_running_jobs)
-        }
-        
-        return {
-            "status": "ok",
-            "project_key": project_key,
-            "cancelled_jobs": cancelled_jobs,
-            "failed_cancellations": failed_cancellations,
-            "cancellation_summary": cancellation_summary,
-            "current_running_jobs": current_running_jobs
-        }
-        
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to cancel running jobs: {str(e)}"
-        }
+        return error(f"Failed to access project '{project_key}': {e}")
+
+    cancelled, failed = [], []
+    for job_id in job_ids:
+        try:
+            job = project.get_job(job_id)
+            state = job_summary(job)["state"]
+            if state in JOB_TERMINAL_STATES:
+                failed.append(
+                    {"job_id": job_id, "error": f"Job is not running (state: {state})"}
+                )
+                continue
+            job.abort()
+            cancelled.append({"job_id": job_id, "previous_state": state})
+        except Exception as e:
+            failed.append({"job_id": job_id, "error": str(e)})
+
+    result = ok if not failed else error
+    return result(
+        message=f"{len(cancelled)} job(s) aborted, {len(failed)} failure(s)",
+        cancelled_jobs=cancelled,
+        failed_cancellations=failed,
+    )

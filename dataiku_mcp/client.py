@@ -42,7 +42,12 @@ def _create_client() -> dataikuapi.DSSClient:
     # Get configuration from environment
     dss_host = os.environ.get("DSS_HOST")
     dss_api_key = os.environ.get("DSS_API_KEY")
-    insecure_tls = os.environ.get("DSS_INSECURE_TLS", "true").lower() == "true"
+    # TLS verification is on unless explicitly disabled (self-signed certs).
+    insecure_tls = os.environ.get("DSS_INSECURE_TLS", "false").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
     
     if not dss_host:
         raise ValueError("DSS_HOST environment variable is required")
@@ -54,7 +59,7 @@ def _create_client() -> dataikuapi.DSSClient:
         client = dataikuapi.DSSClient(
             dss_host,
             dss_api_key,
-            insecure_tls=insecure_tls
+            no_check_certificate=insecure_tls,
         )
         
         # Test connection
@@ -107,4 +112,4 @@ def get_dss_version() -> str:
         str: DSS version string
     """
     client = get_client()
-    return client.get_instance_info()._data.get("dssVersion", "Unknown")
+    return client.get_instance_info().raw.get("dssVersion", "Unknown")

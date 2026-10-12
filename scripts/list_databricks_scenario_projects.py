@@ -22,6 +22,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dataiku_mcp.client import get_client  # noqa: E402
+from dataiku_mcp.tools._common import trigger_datasets  # noqa: E402
+
+# Type of the "dataset modified" scenario trigger in DSS.
+DATASET_TRIGGER_TYPE = "ds_modified"
 
 
 def _databricks_connection_names(client) -> set:
@@ -91,12 +95,11 @@ def find_projects_with_databricks_scenario_trigger(client):
 
         matching_scenarios = []
         for scenario_info in scenarios:
-            scenario_id = scenario_info.get("id") or scenario_info.get("name")
+            scenario_id = scenario_info.get("id")
             scenario = project.get_scenario(scenario_id)
 
             try:
-                settings = scenario.get_settings()
-                triggers = settings.get_triggers()
+                triggers = scenario.get_settings().raw_triggers
             except Exception as e:
                 print(
                     f"[WARN] {project_key}/{scenario_id}: could not read triggers ({e})",
@@ -107,20 +110,21 @@ def find_projects_with_databricks_scenario_trigger(client):
             for trigger in triggers:
                 if not trigger.get("active", False):
                     continue
-                if trigger.get("type") != "dataset":
+                if trigger.get("type") != DATASET_TRIGGER_TYPE:
                     continue
 
-                trigger_dataset = (
-                    trigger.get("params", {}).get("datasetName")
-                    or trigger.get("datasetName")
-                )
-                if trigger_dataset in databricks_datasets:
-                    matching_scenarios.append({
-                        "scenario_id": scenario_id,
-                        "scenario_name": scenario_info.get("name", scenario_id),
-                        "dataset": trigger_dataset,
-                        "trigger_type": trigger.get("type"),
-                    })
+                for trigger_dataset in trigger_datasets(trigger):
+                    # "PROJECT.dataset" when the dataset is in another project
+                    owner, _, name = trigger_dataset.rpartition(".")
+                    if owner not in ("", project_key):
+                        continue
+                    if name in databricks_datasets:
+                        matching_scenarios.append({
+                            "scenario_id": scenario_id,
+                            "scenario_name": scenario_info.get("name", scenario_id),
+                            "dataset": name,
+                            "trigger_type": trigger.get("type"),
+                        })
 
         if matching_scenarios:
             results.append({

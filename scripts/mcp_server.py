@@ -4,7 +4,6 @@ MCP Server entrypoint for Dataiku DSS integration.
 """
 
 import sys
-import asyncio
 import argparse
 import logging
 from pathlib import Path

@@ -3,644 +3,294 @@ Productivity tools for Dataiku MCP integration.
 """
 
 import json
-import yaml
-import copy
 import re
-from datetime import datetime
-from typing import Dict, Any, List, Optional
-from dataiku_mcp.client import get_client, get_project
+from typing import Any, Optional
+
+import yaml
+
+from dataiku_mcp.client import get_project
+from dataiku_mcp.tools import datasets, recipes, scenarios
+from dataiku_mcp.tools._common import CODE_RECIPE_TYPES, error, flat_refs, ok
+from dataiku_mcp.tools.environment_config import _is_sensitive, _mask
+
+DUPLICATION_MODES = ("MINIMAL", "SHARING", "FULL", "NONE")
+
 
 def duplicate_project_structure(
     source_project_key: str,
     target_project_key: str,
-    include_data: bool = False
-) -> Dict[str, Any]:
+    include_data: bool = False,
+    target_project_name: Optional[str] = None,
+    connection_remapping: Optional[dict[str, str]] = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
     """
-    Copy project structure to new project.
-    
+    Duplicate a project with the native DSS duplication.
+
+    Managed datasets are re-created in the target project; with
+    include_data=False (mode MINIMAL) they are empty, with include_data=True
+    (mode FULL) their data is copied as well.
+
     Args:
         source_project_key: Source project identifier
-        target_project_key: Target project identifier
-        include_data: Whether to copy data (default: False)
-        
+        target_project_key: Key of the new project (must not exist)
+        include_data: Whether to copy the data of managed datasets
+        target_project_name: Name of the new project (defaults to its key)
+        connection_remapping: {source connection: target connection}
+        dry_run: Only describe what would be duplicated (default True)
+
     Returns:
         Dict containing duplication results
     """
+    mode = "FULL" if include_data else "MINIMAL"
+
     try:
-        client = get_client()
-        source_project = get_project(source_project_key)
-        
-        # Create target project
-        try:
-            target_project = client.create_project(
-                target_project_key,
-                target_project_key,
-                owner=None  # Will use current user
-            )
-        except Exception as e:
-            if "already exists" in str(e).lower():
-                target_project = get_project(target_project_key)
-            else:
-                return {
-                    "status": "error",
-                    "message": f"Failed to create target project: {str(e)}"
-                }
-        
-        copied_objects = {
-            "datasets": [],
-            "recipes": [],
-            "scenarios": [],
-            "variables": [],
-            "connections": [],
-            "errors": []
-        }
-        
-        # Copy project variables
-        try:
-            source_variables = source_project.get_variables()
-            target_project.set_variables(source_variables)
-            copied_objects["variables"] = list(source_variables.get("standard", {}).keys()) + list(source_variables.get("local", {}).keys())
-        except Exception as e:
-            copied_objects["errors"].append(f"Failed to copy variables: {str(e)}")
-        
-        # Copy datasets
-        datasets = source_project.list_datasets()
-        for dataset in datasets:
-            try:
-                source_dataset = source_project.get_dataset(dataset["name"])
-                source_settings = source_dataset.get_settings()
-                source_schema = source_dataset.get_schema()
-                
-                # Create dataset in target project
-                dataset_name = dataset["name"]
-                dataset_type = dataset["type"]
-                
-                if dataset_type == "UploadedFiles":
-                    # Skip uploaded files as they can't be easily copied
-                    copied_objects["errors"].append(f"Skipped uploaded file dataset: {dataset_name}")
-                    continue
-                
-                # Create dataset with same settings
-                target_dataset = target_project.create_dataset(
-                    dataset_name,
-                    dataset_type,
-                    params=source_settings.get_raw().get("params", {}),
-                    formatType=source_settings.get_raw().get("formatType", "csv")
-                )
-                
-                # Set schema
-                target_dataset.set_schema(source_schema)
-                
-                # Copy data if requested
-                if include_data and dataset_type in ["managed", "filesystem"]:
-                    try:
-                        # Get sample data and write to target
-                        source_df = source_dataset.get_dataframe()
-                        target_dataset.write_with_schema(source_df)
-                    except Exception as e:
-                        copied_objects["errors"].append(f"Failed to copy data for {dataset_name}: {str(e)}")
-                
-                copied_objects["datasets"].append({
-                    "name": dataset_name,
-                    "type": dataset_type,
-                    "data_copied": include_data
-                })
-                
-            except Exception as e:
-                copied_objects["errors"].append(f"Failed to copy dataset {dataset['name']}: {str(e)}")
-        
-        # Copy recipes
-        recipes = source_project.list_recipes()
-        for recipe in recipes:
-            try:
-                source_recipe = source_project.get_recipe(recipe["name"])
-                source_settings = source_recipe.get_settings()
-                source_definition = source_recipe.get_definition()
-                
-                # Create recipe in target project
-                recipe_name = recipe["name"]
-                recipe_type = recipe["type"]
-                
-                # Map inputs and outputs to target project
-                inputs = [inp["ref"] for inp in source_definition["inputs"]]
-                outputs = []
-                for out in source_definition["outputs"]:
-                    outputs.append({
-                        "name": out["ref"],
-                        "new": False  # Assume datasets already exist
-                    })
-                
-                # Create recipe builder
-                builder = target_project.new_recipe(recipe_type, name=recipe_name)
-                
-                # Add inputs
-                for inp in inputs:
-                    try:
-                        builder.with_input(inp)
-                    except:
-                        copied_objects["errors"].append(f"Failed to add input {inp} to recipe {recipe_name}")
-                
-                # Add outputs
-                for out in outputs:
-                    try:
-                        builder.with_output(out["name"])
-                    except:
-                        copied_objects["errors"].append(f"Failed to add output {out['name']} to recipe {recipe_name}")
-                
-                # Create recipe
-                target_recipe = builder.build()
-                
-                # Copy settings and code
-                target_settings = target_recipe.get_settings()
-                
-                # Copy recipe-specific settings
-                if recipe_type in ["python", "r", "sql", "pyspark", "scala", "shell"]:
-                    # Copy code
-                    try:
-                        code = source_settings.get_code()
-                        target_settings.set_code(code)
-                    except Exception as e:
-                        copied_objects["errors"].append(f"Failed to copy code for recipe {recipe_name}: {str(e)}")
-                
-                # Copy other recipe parameters
-                try:
-                    source_params = source_settings.get_recipe_params()
-                    target_settings.set_recipe_params(source_params)
-                except Exception as e:
-                    copied_objects["errors"].append(f"Failed to copy parameters for recipe {recipe_name}: {str(e)}")
-                
-                target_settings.save()
-                
-                copied_objects["recipes"].append({
-                    "name": recipe_name,
-                    "type": recipe_type,
-                    "inputs": inputs,
-                    "outputs": [out["name"] for out in outputs]
-                })
-                
-            except Exception as e:
-                copied_objects["errors"].append(f"Failed to copy recipe {recipe['name']}: {str(e)}")
-        
-        # Copy scenarios
-        scenarios = source_project.list_scenarios()
-        for scenario in scenarios:
-            try:
-                source_scenario = source_project.get_scenario(scenario["id"])
-                source_settings = source_scenario.get_settings()
-                source_metadata = source_scenario.get_metadata()
-                
-                # Create scenario in target project
-                scenario_name = scenario["name"]
-                scenario_type = scenario["type"]
-                
-                target_scenario = target_project.create_scenario(
-                    scenario_name,
-                    scenario_type,
-                    definition=source_settings.get_definition()
-                )
-                
-                # Copy settings
-                target_settings = target_scenario.get_settings()
-                target_settings.raw_steps = copy.deepcopy(source_settings.raw_steps)
-                target_settings.raw_triggers = copy.deepcopy(source_settings.raw_triggers)
-                target_settings.active = source_settings.active
-                target_settings.save()
-                
-                # Copy metadata
-                target_scenario.set_metadata(source_metadata)
-                
-                copied_objects["scenarios"].append({
-                    "name": scenario_name,
-                    "type": scenario_type,
-                    "id": target_scenario.scenario_id,
-                    "steps": len(source_settings.raw_steps),
-                    "triggers": len(source_settings.raw_triggers)
-                })
-                
-            except Exception as e:
-                copied_objects["errors"].append(f"Failed to copy scenario {scenario['name']}: {str(e)}")
-        
-        # Summary statistics
-        duplication_summary = {
+        source = get_project(source_project_key)
+        summary = {
             "source_project": source_project_key,
             "target_project": target_project_key,
-            "include_data": include_data,
-            "datasets_copied": len(copied_objects["datasets"]),
-            "recipes_copied": len(copied_objects["recipes"]),
-            "scenarios_copied": len(copied_objects["scenarios"]),
-            "variables_copied": len(copied_objects["variables"]),
-            "total_errors": len(copied_objects["errors"]),
-            "success_rate": (
-                (len(copied_objects["datasets"]) + len(copied_objects["recipes"]) + len(copied_objects["scenarios"])) /
-                (len(datasets) + len(recipes) + len(scenarios)) * 100
-                if (len(datasets) + len(recipes) + len(scenarios)) > 0 else 0
+            "duplication_mode": mode,
+            "datasets": len(source.list_datasets()),
+            "recipes": len(source.list_recipes()),
+            "scenarios": len(source.list_scenarios()),
+            "connection_remapping": connection_remapping or {},
+        }
+
+        if dry_run:
+            return ok(
+                dry_run=True,
+                duplication_summary=summary,
+                message="Dry run: call again with dry_run=false to duplicate",
             )
+
+        remapping = {
+            "connections": [
+                {"source": s, "target": t}
+                for s, t in (connection_remapping or {}).items()
+            ]
         }
-        
-        return {
-            "status": "ok",
-            "duplication_summary": duplication_summary,
-            "copied_objects": copied_objects
-        }
-        
+        result = source.duplicate(
+            target_project_key,
+            target_project_name or target_project_key,
+            duplication_mode=mode,
+            remapping=remapping,
+        )
+
+        return ok(
+            dry_run=False,
+            duplication_summary=summary,
+            dss_result=result,
+            message=(
+                f"Project '{source_project_key}' duplicated to "
+                f"'{target_project_key}'"
+            ),
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to duplicate project structure: {str(e)}"
-        }
+        return error(f"Failed to duplicate project '{source_project_key}': {e}")
 
 
 def export_project_config(
-    project_key: str,
-    format: str = "json"
-) -> Dict[str, Any]:
+    project_key: str, format: str = "json"
+) -> dict[str, Any]:
     """
-    Export project configuration as JSON/YAML.
-    
+    Export the configuration of a project: metadata, variables (sensitive
+    names masked), datasets, recipes (with code) and scenarios.
+
     Args:
         project_key: The project key
-        format: Export format (json/yaml)
-        
+        format: Export format ('json' or 'yaml')
+
     Returns:
-        Dict containing exported configuration
+        Dict with the configuration (as a dict and as a serialized string)
     """
+    if format.lower() not in ("json", "yaml"):
+        return error("format must be 'json' or 'yaml'", "invalid_argument")
+
     try:
         project = get_project(project_key)
-        
-        # Gather all project configuration
-        config = {
-            "project_info": {},
-            "variables": {},
+        metadata = project.get_metadata()
+        variables = project.get_variables()
+        warnings = []
+
+        config: dict[str, Any] = {
+            "project": {
+                "key": project_key,
+                "name": metadata.get("label", project_key),
+                "description": metadata.get("description", ""),
+                "tags": metadata.get("tags", []),
+            },
+            "variables": {
+                "standard": _mask(variables.get("standard") or {}),
+                "local": _mask(variables.get("local") or {}),
+            },
             "datasets": [],
             "recipes": [],
             "scenarios": [],
-            "connections": [],
-            "settings": {}
         }
-        
-        # Get project metadata
-        metadata = project.get_metadata()
-        config["project_info"] = {
-            "key": project_key,
-            "name": metadata.get("name", project_key),
-            "description": metadata.get("description", ""),
-            "tags": metadata.get("tags", []),
-            "owner": metadata.get("owner", "unknown"),
-            "custom_fields": metadata.get("customFields", {}),
-            "creation_date": metadata.get("creationDate", ""),
-            "export_date": str(datetime.now()) if 'datetime' in globals() else "unknown"
-        }
-        
-        # Get project variables
-        variables = project.get_variables()
-        config["variables"] = {
-            "standard": variables.get("standard", {}),
-            "local": variables.get("local", {})
-        }
-        
-        # Get project settings
-        settings = project.get_settings()
-        config["settings"] = {
-            "code_env_settings": settings.get_code_env_settings(),
-            "bundle_export_options": settings.get_raw().get("bundleExportOptions", {}),
-            "git_reference": settings.get_raw().get("gitReference", {}),
-            "flow_display_settings": settings.get_raw().get("flowDisplaySettings", {})
-        }
-        
-        # Export datasets
-        datasets = project.list_datasets()
-        for dataset in datasets:
-            try:
-                dataset_obj = project.get_dataset(dataset["name"])
-                dataset_settings = dataset_obj.get_settings()
-                dataset_schema = dataset_obj.get_schema()
-                
-                dataset_config = {
-                    "name": dataset["name"],
-                    "type": dataset["type"],
-                    "description": dataset.get("description", ""),
-                    "tags": dataset.get("tags", []),
-                    "settings": dataset_settings.get_raw(),
-                    "schema": dataset_schema
+
+        for item in project.list_datasets():
+            params = item.get("params") or {}
+            config["datasets"].append(
+                {
+                    "name": item.get("name"),
+                    "type": item.get("type"),
+                    "managed": item.get("managed", False),
+                    "params": {
+                        k: v for k, v in params.items() if not _is_sensitive(k)
+                    },
+                    "format_type": item.get("formatType"),
+                    "partitioning": item.get("partitioning"),
+                    "schema": (item.get("schema") or {}).get("columns", []),
                 }
-                
-                config["datasets"].append(dataset_config)
-                
-            except Exception as e:
-                config["datasets"].append({
-                    "name": dataset["name"],
-                    "error": f"Failed to export dataset: {str(e)}"
-                })
-        
-        # Export recipes
-        recipes = project.list_recipes()
-        for recipe in recipes:
+            )
+
+        for item in project.list_recipes():
+            name = item.get("name")
+            entry = {
+                "name": name,
+                "type": item.get("type"),
+                "inputs": flat_refs(item.get("inputs")),
+                "outputs": flat_refs(item.get("outputs")),
+            }
             try:
-                recipe_obj = project.get_recipe(recipe["name"])
-                recipe_settings = recipe_obj.get_settings()
-                recipe_definition = recipe_obj.get_definition()
-                
-                recipe_config = {
-                    "name": recipe["name"],
-                    "type": recipe["type"],
-                    "description": recipe.get("description", ""),
-                    "tags": recipe.get("tags", []),
-                    "definition": recipe_definition,
-                    "settings": recipe_settings.get_raw()
-                }
-                
-                # Include code for code recipes
-                if recipe["type"] in ["python", "r", "sql", "pyspark", "scala", "shell"]:
-                    try:
-                        code = recipe_settings.get_code()
-                        recipe_config["code"] = code
-                    except:
-                        recipe_config["code"] = "# Could not retrieve code"
-                
-                config["recipes"].append(recipe_config)
-                
+                settings = project.get_recipe(name).get_settings()
+                entry["params"] = settings.raw_params
+                if settings.type in CODE_RECIPE_TYPES:
+                    entry["code"] = settings.str_payload
+                else:
+                    entry["payload"] = settings.obj_payload
             except Exception as e:
-                config["recipes"].append({
-                    "name": recipe["name"],
-                    "error": f"Failed to export recipe: {str(e)}"
-                })
-        
-        # Export scenarios
-        scenarios = project.list_scenarios()
-        for scenario in scenarios:
+                warnings.append(f"Recipe {name}: {e}")
+            config["recipes"].append(entry)
+
+        for item in project.list_scenarios():
+            scenario_id = item.get("id")
             try:
-                scenario_obj = project.get_scenario(scenario["id"])
-                scenario_settings = scenario_obj.get_settings()
-                scenario_metadata = scenario_obj.get_metadata()
-                
-                scenario_config = {
-                    "id": scenario["id"],
-                    "name": scenario["name"],
-                    "type": scenario["type"],
-                    "description": scenario.get("description", ""),
-                    "tags": scenario.get("tags", []),
-                    "active": scenario.get("active", False),
-                    "metadata": scenario_metadata,
-                    "settings": scenario_settings.get_raw(),
-                    "steps": scenario_settings.raw_steps,
-                    "triggers": scenario_settings.raw_triggers
+                settings = project.get_scenario(scenario_id).get_settings()
+                raw = settings.get_raw()
+                entry = {
+                    "id": scenario_id,
+                    "name": raw.get("name"),
+                    "type": raw.get("type"),
+                    "active": settings.active,
+                    "triggers": settings.raw_triggers,
+                    "reporters": settings.raw_reporters,
                 }
-                
-                config["scenarios"].append(scenario_config)
-                
+                if raw.get("type") == "custom_python":
+                    entry["script"] = settings.code
+                else:
+                    entry["steps"] = settings.raw_steps
             except Exception as e:
-                config["scenarios"].append({
-                    "id": scenario["id"],
-                    "name": scenario["name"],
-                    "error": f"Failed to export scenario: {str(e)}"
-                })
-        
-        # Format output
+                warnings.append(f"Scenario {scenario_id}: {e}")
+                entry = {"id": scenario_id, "name": item.get("name")}
+            config["scenarios"].append(entry)
+
         if format.lower() == "yaml":
-            try:
-                config_output = yaml.dump(config, default_flow_style=False, indent=2)
-                content_type = "yaml"
-            except Exception as e:
-                return {
-                    "status": "error",
-                    "message": f"Failed to format as YAML: {str(e)}"
-                }
+            content = yaml.safe_dump(config, allow_unicode=True, sort_keys=False)
         else:
-            config_output = json.dumps(config, indent=2, default=str)
-            content_type = "json"
-        
-        # Export statistics
-        export_stats = {
-            "project_key": project_key,
-            "format": content_type,
-            "datasets_exported": len([d for d in config["datasets"] if "error" not in d]),
-            "recipes_exported": len([r for r in config["recipes"] if "error" not in r]),
-            "scenarios_exported": len([s for s in config["scenarios"] if "error" not in s]),
-            "variables_exported": len(config["variables"]["standard"]) + len(config["variables"]["local"]),
-            "export_size": len(config_output),
-            "total_objects": len(config["datasets"]) + len(config["recipes"]) + len(config["scenarios"])
-        }
-        
-        return {
-            "status": "ok",
-            "export_stats": export_stats,
-            "config": config,
-            "config_output": config_output,
-            "content_type": content_type
-        }
-        
+            content = json.dumps(config, indent=2, ensure_ascii=False, default=str)
+
+        result = ok(
+            project_key=project_key,
+            format=format.lower(),
+            stats={
+                "datasets": len(config["datasets"]),
+                "recipes": len(config["recipes"]),
+                "scenarios": len(config["scenarios"]),
+            },
+            config=config,
+            content=content,
+        )
+        if warnings:
+            result["warnings"] = warnings
+        return result
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to export project configuration: {str(e)}"
-        }
+        return error(f"Failed to export config of '{project_key}': {e}")
+
+
+_UPDATERS = {
+    "datasets": ("name", datasets.update_dataset),
+    "recipes": ("name", recipes.update_recipe),
+    "scenarios": ("id", scenarios.update_scenario),
+}
 
 
 def batch_update_objects(
     project_key: str,
     object_type: str,
     pattern: str,
-    updates: Dict[str, Any]
-) -> Dict[str, Any]:
+    updates: dict[str, Any],
+    dry_run: bool = True,
+) -> dict[str, Any]:
     """
-    Update multiple objects with similar changes.
-    
+    Apply the same update to every object whose name matches a pattern.
+
     Args:
         project_key: The project key
-        object_type: Type of objects to update (datasets, recipes, scenarios)
-        pattern: Pattern to match objects (regex supported)
-        updates: Updates to apply
-        
+        object_type: 'datasets', 'recipes' or 'scenarios'
+        pattern: Regular expression matched against the object name
+            (scenario: id or name)
+        updates: Fields accepted by update_dataset / update_recipe /
+            update_scenario (e.g. {"tags": [...], "description": "..."})
+        dry_run: Only list the matching objects (default True)
+
     Returns:
         Dict containing update results
     """
+    kind = object_type.lower()
+    if kind not in _UPDATERS:
+        return error(
+            f"Unsupported object type: {object_type}. "
+            f"Supported types: {sorted(_UPDATERS)}",
+            "invalid_argument",
+        )
+    if not updates:
+        return error("updates must not be empty", "invalid_argument")
+    try:
+        regex = re.compile(pattern, re.IGNORECASE)
+    except re.error as e:
+        return error(f"Invalid pattern: {e}", "invalid_argument")
+
     try:
         project = get_project(project_key)
-        
-        # Compile pattern
-        try:
-            regex_pattern = re.compile(pattern, re.IGNORECASE)
-        except re.error:
-            # If regex fails, use simple string matching
-            regex_pattern = None
-        
-        updated_objects = []
-        failed_updates = []
-        
-        if object_type.lower() == "datasets":
-            # Update datasets
-            datasets = project.list_datasets()
-            
-            for dataset in datasets:
-                dataset_name = dataset["name"]
-                
-                # Check if matches pattern
-                matches = False
-                if regex_pattern:
-                    matches = regex_pattern.search(dataset_name)
-                else:
-                    matches = pattern.lower() in dataset_name.lower()
-                
-                if matches:
-                    try:
-                        dataset_obj = project.get_dataset(dataset_name)
-                        
-                        # Apply updates
-                        if "description" in updates:
-                            metadata = dataset_obj.get_metadata()
-                            metadata["description"] = updates["description"]
-                            dataset_obj.set_metadata(metadata)
-                        
-                        if "tags" in updates:
-                            metadata = dataset_obj.get_metadata()
-                            metadata["tags"] = updates["tags"]
-                            dataset_obj.set_metadata(metadata)
-                        
-                        if "settings" in updates:
-                            settings = dataset_obj.get_settings()
-                            raw_settings = settings.get_raw()
-                            raw_settings.update(updates["settings"])
-                            settings.save()
-                        
-                        updated_objects.append({
-                            "name": dataset_name,
-                            "type": "dataset",
-                            "updates_applied": list(updates.keys())
-                        })
-                        
-                    except Exception as e:
-                        failed_updates.append({
-                            "name": dataset_name,
-                            "type": "dataset",
-                            "error": str(e)
-                        })
-        
-        elif object_type.lower() == "recipes":
-            # Update recipes
-            recipes = project.list_recipes()
-            
-            for recipe in recipes:
-                recipe_name = recipe["name"]
-                
-                # Check if matches pattern
-                matches = False
-                if regex_pattern:
-                    matches = regex_pattern.search(recipe_name)
-                else:
-                    matches = pattern.lower() in recipe_name.lower()
-                
-                if matches:
-                    try:
-                        recipe_obj = project.get_recipe(recipe_name)
-                        settings = recipe_obj.get_settings()
-                        
-                        # Apply updates
-                        if "description" in updates:
-                            metadata = recipe_obj.get_metadata()
-                            metadata["description"] = updates["description"]
-                            recipe_obj.set_metadata(metadata)
-                        
-                        if "tags" in updates:
-                            metadata = recipe_obj.get_metadata()
-                            metadata["tags"] = updates["tags"]
-                            recipe_obj.set_metadata(metadata)
-                        
-                        if "code" in updates and recipe["type"] in ["python", "r", "sql", "pyspark", "scala", "shell"]:
-                            settings.set_code(updates["code"])
-                        
-                        if "recipe_params" in updates:
-                            settings.set_recipe_params(updates["recipe_params"])
-                        
-                        settings.save()
-                        
-                        updated_objects.append({
-                            "name": recipe_name,
-                            "type": "recipe",
-                            "updates_applied": list(updates.keys())
-                        })
-                        
-                    except Exception as e:
-                        failed_updates.append({
-                            "name": recipe_name,
-                            "type": "recipe",
-                            "error": str(e)
-                        })
-        
-        elif object_type.lower() == "scenarios":
-            # Update scenarios
-            scenarios = project.list_scenarios()
-            
-            for scenario in scenarios:
-                scenario_name = scenario["name"]
-                
-                # Check if matches pattern
-                matches = False
-                if regex_pattern:
-                    matches = regex_pattern.search(scenario_name)
-                else:
-                    matches = pattern.lower() in scenario_name.lower()
-                
-                if matches:
-                    try:
-                        scenario_obj = project.get_scenario(scenario["id"])
-                        
-                        # Apply updates
-                        if "description" in updates:
-                            metadata = scenario_obj.get_metadata()
-                            metadata["description"] = updates["description"]
-                            scenario_obj.set_metadata(metadata)
-                        
-                        if "tags" in updates:
-                            metadata = scenario_obj.get_metadata()
-                            metadata["tags"] = updates["tags"]
-                            scenario_obj.set_metadata(metadata)
-                        
-                        if "active" in updates:
-                            settings = scenario_obj.get_settings()
-                            settings.active = updates["active"]
-                            settings.save()
-                        
-                        updated_objects.append({
-                            "name": scenario_name,
-                            "type": "scenario",
-                            "id": scenario["id"],
-                            "updates_applied": list(updates.keys())
-                        })
-                        
-                    except Exception as e:
-                        failed_updates.append({
-                            "name": scenario_name,
-                            "type": "scenario",
-                            "id": scenario["id"],
-                            "error": str(e)
-                        })
-        
-        else:
-            return {
-                "status": "error",
-                "message": f"Unsupported object type: {object_type}. Supported types: datasets, recipes, scenarios"
-            }
-        
-        # Summary
-        update_summary = {
-            "object_type": object_type,
-            "pattern": pattern,
-            "updates_requested": updates,
-            "objects_updated": len(updated_objects),
-            "objects_failed": len(failed_updates),
-            "success_rate": (len(updated_objects) / (len(updated_objects) + len(failed_updates)) * 100) if (len(updated_objects) + len(failed_updates)) > 0 else 0
-        }
-        
-        return {
-            "status": "ok",
-            "project_key": project_key,
-            "update_summary": update_summary,
-            "updated_objects": updated_objects,
-            "failed_updates": failed_updates
-        }
-        
+        listing = {
+            "datasets": project.list_datasets,
+            "recipes": project.list_recipes,
+            "scenarios": project.list_scenarios,
+        }[kind]()
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to batch update objects: {str(e)}"
-        }
+        return error(f"Failed to list {kind} of '{project_key}': {e}")
+
+    id_field, updater = _UPDATERS[kind]
+    matches = [
+        item.get(id_field)
+        for item in listing
+        if regex.search(item.get(id_field) or "")
+        or regex.search(item.get("name") or "")
+    ]
+
+    if dry_run:
+        return ok(
+            dry_run=True,
+            matching_objects=matches,
+            match_count=len(matches),
+            message="Dry run: call again with dry_run=false to apply",
+        )
+
+    updated, failed = [], []
+    for object_id in matches:
+        result = updater(project_key, object_id, **updates)
+        if result.get("status") == "ok":
+            updated.append(object_id)
+        else:
+            failed.append({"id": object_id, "error": result.get("message")})
+
+    respond = ok if not failed else error
+    return respond(
+        message=f"{len(updated)} {kind} updated, {len(failed)} failure(s)",
+        dry_run=False,
+        updated_objects=updated,
+        failed_updates=failed,
+    )
