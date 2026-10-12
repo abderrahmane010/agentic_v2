@@ -1,662 +1,561 @@
 """
 Dataset management tools for Dataiku DSS.
 
-This module provides functions for creating, updating, deleting, building, and inspecting datasets
-in Dataiku DSS projects through the dataiku-api-client.
+This module provides functions for creating, updating, deleting, building and
+inspecting datasets in Dataiku DSS projects through the dataiku-api-client.
 """
 
-from typing import Dict, List, Optional, Union, Any
-import dataikuapi
-import dataikuapi.dss.project
-import dataikuapi.dss.dataset
-from dataiku_mcp.client import get_client, get_project
+from typing import Any, Optional
+
+from dataiku_mcp.client import get_project
+from dataiku_mcp.tools._common import (
+    BUILD_MODES,
+    error,
+    iso,
+    job_summary,
+    ok,
+    wait_for_job,
+)
 
 
 def create_dataset(
     project_key: str,
     dataset_name: str,
     dataset_type: str,
-    params: Optional[Dict[str, Any]] = None
-) -> Dict[str, Any]:
+    params: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     """
     Create a new dataset in a Dataiku DSS project.
-    
+
     Args:
         project_key: The project key where the dataset will be created
         dataset_name: Name of the dataset to create
-        dataset_type: Type of dataset (e.g., 'filesystem', 'sql', 'uploaded', 'managed', 's3', 'hdfs')
+        dataset_type: 'managed', 'filesystem', 'sql', 's3', 'uploaded', or any
+            raw DSS dataset type (e.g. 'HDFS', 'Snowflake')
         params: Optional parameters dict containing:
-            - connection: Connection name (for sql, s3, hdfs, etc.)
-            - path: Path in connection (for filesystem, s3, hdfs)
-            - table: Table name (for sql)
-            - schema: Schema name (for sql)
-            - catalog: Catalog name (for sql, optional)
-            - bucket: Bucket name (for s3, optional)
-            - format_type: Format type (csv, json, parquet, etc.)
-            - format_params: Format-specific parameters
+            - connection: Connection name
+            - path: Path in connection (filesystem, s3)
+            - table / schema / catalog: SQL table location (sql)
+            - sql_type: DSS SQL dataset type, e.g. 'PostgreSQL',
+              'Snowflake', 'Oracle' (required for sql)
+            - bucket: Bucket name (s3, optional)
+            - format_type / format_params: File format (file-based datasets)
             - store_into: Connection for managed datasets
-    
+
     Returns:
         Dict with status and dataset details or error message
     """
+    params = dict(params or {})
+    kind = dataset_type.lower()
+
     try:
         project = get_project(project_key)
-        params = params or {}
-        
-        # Handle managed datasets
-        if dataset_type.lower() == 'managed':
+
+        if kind == "managed":
             builder = project.new_managed_dataset(dataset_name)
-            store_into = params.get('store_into', 'filesystem_managed')
-            builder = builder.with_store_into(store_into)
-            
-            # Set format if provided
-            format_type = params.get('format_type')
-            if format_type:
-                format_params = params.get('format_params', {})
-                builder = builder.with_format(format_type, **format_params)
-            
+            builder = builder.with_store_into(
+                params.get("store_into", "filesystem_managed"),
+                format_option_id=params.get("format_type"),
+            )
             dataset = builder.create()
-            
-        # Handle filesystem datasets
-        elif dataset_type.lower() == 'filesystem':
-            connection = params.get('connection', 'filesystem_managed')
-            path = params.get('path')
-            if not path:
-                return {
-                    "status": "error",
-                    "message": "Path is required for filesystem datasets"
-                }
-            
+
+        elif kind == "filesystem":
+            if not params.get("path"):
+                return error(
+                    "Path is required for filesystem datasets",
+                    "invalid_argument",
+                )
             dataset = project.create_filesystem_dataset(
                 dataset_name,
-                connection,
-                path
+                params.get("connection", "filesystem_managed"),
+                params["path"],
             )
-            
-        # Handle SQL datasets
-        elif dataset_type.lower() == 'sql':
-            connection = params.get('connection')
-            table = params.get('table')
-            schema = params.get('schema')
-            catalog = params.get('catalog')
-            
-            if not all([connection, table]):
-                return {
-                    "status": "error",
-                    "message": "Connection and table are required for SQL datasets"
-                }
-            
+
+        elif kind == "sql":
+            missing = [
+                k for k in ("connection", "table", "sql_type") if not params.get(k)
+            ]
+            if missing:
+                return error(
+                    f"Missing parameters for SQL dataset: {missing}",
+                    "invalid_argument",
+                )
             dataset = project.create_sql_table_dataset(
                 dataset_name,
-                'sql',
-                connection,
-                table,
-                schema,
-                catalog
+                params["sql_type"],
+                params["connection"],
+                params["table"],
+                params.get("schema"),
+                params.get("catalog"),
             )
-            
-        # Handle S3 datasets
-        elif dataset_type.lower() == 's3':
-            connection = params.get('connection')
-            path = params.get('path')
-            bucket = params.get('bucket')
-            
-            if not all([connection, path]):
-                return {
-                    "status": "error",
-                    "message": "Connection and path are required for S3 datasets"
-                }
-            
+
+        elif kind == "s3":
+            if not params.get("connection") or not params.get("path"):
+                return error(
+                    "Connection and path are required for S3 datasets",
+                    "invalid_argument",
+                )
             dataset = project.create_s3_dataset(
                 dataset_name,
-                connection,
-                path,
-                bucket
+                params["connection"],
+                params["path"],
+                params.get("bucket"),
             )
-            
-        # Handle upload datasets
-        elif dataset_type.lower() == 'uploaded':
-            connection = params.get('connection')
-            dataset = project.create_upload_dataset(dataset_name, connection)
-            
-        # Handle generic datasets
+
+        elif kind == "uploaded":
+            dataset = project.create_upload_dataset(
+                dataset_name, params.get("connection")
+            )
+
         else:
-            format_type = params.get('format_type')
-            format_params = params.get('format_params', {})
-            
+            format_type = params.pop("format_type", None)
+            format_params = params.pop("format_params", None)
             dataset = project.create_dataset(
                 dataset_name,
                 dataset_type,
-                params,
-                format_type,
-                format_params
+                params=params,
+                formatType=format_type,
+                formatParams=format_params,
             )
-        
-        # Set additional format parameters if provided
-        if params.get('format_type') and dataset_type.lower() != 'managed':
+
+        # File format for file-based datasets created above.
+        if kind in ("filesystem", "s3") and params.get("format_type"):
             settings = dataset.get_settings()
-            settings.set_format_type(params['format_type'])
-            if params.get('format_params'):
-                settings.set_format_params(params['format_params'])
+            settings.set_format(
+                params["format_type"], params.get("format_params")
+            )
             settings.save()
-        
-        return {
-            "status": "ok",
-            "dataset_name": dataset_name,
-            "dataset_type": dataset_type,
-            "dataset_id": dataset.id,
-            "project_key": project_key,
-            "message": f"Dataset '{dataset_name}' created successfully"
-        }
-        
+
+        return ok(
+            dataset_name=dataset.name,
+            dataset_type=dataset_type,
+            project_key=project_key,
+            message=f"Dataset '{dataset_name}' created successfully",
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to create dataset '{dataset_name}': {str(e)}"
-        }
+        return error(f"Failed to create dataset '{dataset_name}': {e}")
 
 
 def update_dataset(
-    project_key: str,
-    dataset_name: str,
-    **kwargs
-) -> Dict[str, Any]:
+    project_key: str, dataset_name: str, **kwargs: Any
+) -> dict[str, Any]:
     """
     Update an existing dataset's settings.
-    
+
     Args:
         project_key: The project key containing the dataset
         dataset_name: Name of the dataset to update
         **kwargs: Update parameters including:
-            - description: Dataset description
-            - tags: List of tags
-            - custom_fields: Dict of custom metadata fields
-            - format_type: Format type (csv, json, parquet, etc.)
-            - format_params: Format-specific parameters
-            - connection: Connection name (for applicable datasets)
-            - path: Path in connection (for applicable datasets)
-            - table: Table name (for SQL datasets)
-            - schema: Schema name (for SQL datasets)
-    
+            - description, tags, custom_fields: metadata
+            - format_type, format_params: file format (file-based datasets)
+            - connection, path: location (file-based datasets)
+            - connection, table, schema, catalog: location (SQL datasets)
+
     Returns:
         Dict with status and update details or error message
     """
+    supported = {
+        "description",
+        "tags",
+        "custom_fields",
+        "format_type",
+        "format_params",
+        "connection",
+        "path",
+        "table",
+        "schema",
+        "catalog",
+    }
+    unknown = sorted(set(kwargs) - supported)
+    if unknown:
+        return error(
+            f"Unsupported fields: {unknown}. Supported: {sorted(supported)}",
+            "invalid_argument",
+        )
+
     try:
-        project = get_project(project_key)
-        dataset = project.get_dataset(dataset_name)
-        
+        settings = get_project(project_key).get_dataset(dataset_name).get_settings()
+        raw_params = settings.get_raw_params()
         updated_fields = []
-        
-        # Update metadata if provided
-        if any(key in kwargs for key in ['description', 'tags', 'custom_fields']):
-            metadata = dataset.get_metadata()
-            
-            if 'description' in kwargs:
-                metadata['description'] = kwargs['description']
-                updated_fields.append('description')
-            
-            if 'tags' in kwargs:
-                metadata['tags'] = kwargs['tags']
-                updated_fields.append('tags')
-            
-            if 'custom_fields' in kwargs:
-                if 'customFields' not in metadata:
-                    metadata['customFields'] = {}
-                metadata['customFields'].update(kwargs['custom_fields'])
-                updated_fields.append('custom_fields')
-            
-            dataset.set_metadata(metadata)
-        
-        # Update settings if provided
-        if any(key in kwargs for key in ['format_type', 'format_params', 'connection', 'path', 'table', 'schema']):
-            settings = dataset.get_settings()
-            
-            if 'format_type' in kwargs:
-                settings.set_format_type(kwargs['format_type'])
-                updated_fields.append('format_type')
-            
-            if 'format_params' in kwargs:
-                settings.set_format_params(kwargs['format_params'])
-                updated_fields.append('format_params')
-            
-            # Update connection settings based on dataset type
-            if hasattr(settings, 'set_connection') and 'connection' in kwargs:
-                settings.set_connection(kwargs['connection'])
-                updated_fields.append('connection')
-            
-            if hasattr(settings, 'set_path') and 'path' in kwargs:
-                settings.set_path(kwargs['path'])
-                updated_fields.append('path')
-            
-            # SQL-specific settings
-            if hasattr(settings, 'set_table') and any(key in kwargs for key in ['table', 'schema']):
-                connection = getattr(settings, 'connection', kwargs.get('connection'))
-                table = kwargs.get('table', getattr(settings, 'table', None))
-                schema = kwargs.get('schema', getattr(settings, 'schema', None))
-                
-                if connection and table:
-                    settings.set_table(connection, schema, table)
-                    updated_fields.extend(['table', 'schema'])
-            
-            settings.save()
-        
-        return {
-            "status": "ok",
-            "dataset_name": dataset_name,
-            "updated_fields": updated_fields,
-            "message": f"Dataset '{dataset_name}' updated successfully"
-        }
-        
+
+        if "description" in kwargs:
+            settings.description = kwargs["description"]
+            updated_fields.append("description")
+        if "tags" in kwargs:
+            settings.tags = kwargs["tags"]
+            updated_fields.append("tags")
+        if "custom_fields" in kwargs:
+            settings.custom_fields = {
+                **(settings.custom_fields or {}),
+                **kwargs["custom_fields"],
+            }
+            updated_fields.append("custom_fields")
+
+        is_fs = hasattr(settings, "set_connection_and_path")
+        is_sql = hasattr(settings, "set_table")
+
+        if "format_type" in kwargs or "format_params" in kwargs:
+            if not is_fs:
+                return error(
+                    f"Dataset '{dataset_name}' (type {settings.type}) has no "
+                    "file format",
+                    "invalid_argument",
+                )
+            settings.set_format(
+                kwargs.get("format_type", settings.get_raw().get("formatType")),
+                kwargs.get("format_params"),
+            )
+            updated_fields.append("format")
+
+        location_keys = {"connection", "path", "table", "schema", "catalog"}
+        if location_keys & set(kwargs):
+            connection = kwargs.get("connection", raw_params.get("connection"))
+            if is_fs:
+                settings.set_connection_and_path(
+                    connection, kwargs.get("path", raw_params.get("path"))
+                )
+            elif is_sql:
+                settings.set_table(
+                    connection,
+                    kwargs.get("schema", raw_params.get("schema")),
+                    kwargs.get("table", raw_params.get("table")),
+                    kwargs.get("catalog", raw_params.get("catalog")),
+                )
+            else:
+                return error(
+                    f"Location of dataset type {settings.type} cannot be "
+                    "changed with this tool",
+                    "invalid_argument",
+                )
+            updated_fields.append("location")
+
+        settings.save()
+
+        return ok(
+            dataset_name=dataset_name,
+            updated_fields=updated_fields,
+            message=f"Dataset '{dataset_name}' updated successfully",
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to update dataset '{dataset_name}': {str(e)}"
-        }
+        return error(f"Failed to update dataset '{dataset_name}': {e}")
 
 
 def delete_dataset(
-    project_key: str,
-    dataset_name: str,
-    drop_data: bool = False
-) -> Dict[str, Any]:
+    project_key: str, dataset_name: str, drop_data: bool = False
+) -> dict[str, Any]:
     """
     Delete a dataset from a Dataiku DSS project.
-    
+
     Args:
         project_key: The project key containing the dataset
         dataset_name: Name of the dataset to delete
         drop_data: Whether to also drop the underlying data (default: False)
-    
+
     Returns:
         Dict with status and deletion details or error message
     """
     try:
-        project = get_project(project_key)
-        dataset = project.get_dataset(dataset_name)
-        
-        # Store dataset info before deletion
-        dataset_info = {
-            "name": dataset_name,
-            "type": dataset.get_type(),
-            "id": dataset.id
-        }
-        
-        # Delete the dataset
+        dataset = get_project(project_key).get_dataset(dataset_name)
+        dataset_type = dataset.get_settings().type
         dataset.delete(drop_data=drop_data)
-        
-        return {
-            "status": "ok",
-            "deleted_dataset": dataset_info,
-            "drop_data": drop_data,
-            "message": f"Dataset '{dataset_name}' deleted successfully"
-        }
-        
+
+        return ok(
+            deleted_dataset={"name": dataset_name, "type": dataset_type},
+            drop_data=drop_data,
+            message=f"Dataset '{dataset_name}' deleted successfully",
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to delete dataset '{dataset_name}': {str(e)}"
-        }
+        return error(f"Failed to delete dataset '{dataset_name}': {e}")
 
 
 def build_dataset(
     project_key: str,
     dataset_name: str,
     mode: Optional[str] = None,
-    partition: Optional[str] = None
-) -> Dict[str, Any]:
+    partition: Optional[str] = None,
+    wait: bool = True,
+) -> dict[str, Any]:
     """
     Build a dataset to refresh its content.
-    
+
     Args:
         project_key: The project key containing the dataset
         dataset_name: Name of the dataset to build
-        mode: Optional build mode:
-            - "NON_RECURSIVE_FORCED_BUILD": Default non-recursive forced build
-            - "RECURSIVE_BUILD": Recursive build
-            - "RECURSIVE_FORCED_BUILD": Recursive forced build
+        mode: Optional build mode (default NON_RECURSIVE_FORCED_BUILD):
+            RECURSIVE_BUILD, NON_RECURSIVE_FORCED_BUILD, RECURSIVE_FORCED_BUILD
         partition: Optional partition to build (for partitioned datasets)
-    
+        wait: Wait for the job to finish (False returns the job id at once)
+
     Returns:
-        Dict with status and build job details or error message
+        Dict with the job state. "status" is "error" if the job did not
+        finish with state DONE.
     """
+    if mode and mode not in BUILD_MODES:
+        return error(
+            f"Invalid build mode. Must be one of: {list(BUILD_MODES)}",
+            "invalid_argument",
+        )
+
     try:
-        project = get_project(project_key)
-        dataset = project.get_dataset(dataset_name)
-        
-        # Prepare build parameters
-        build_params = {
-            "wait": True,
-            "no_fail": False
-        }
-        
-        if mode:
-            valid_modes = [
-                "RECURSIVE_BUILD",
-                "NON_RECURSIVE_FORCED_BUILD",
-                "RECURSIVE_FORCED_BUILD"
-            ]
-            if mode not in valid_modes:
-                return {
-                    "status": "error",
-                    "message": f"Invalid build mode. Must be one of: {valid_modes}"
-                }
-            build_params["job_type"] = mode
-        
-        if partition:
-            build_params["partitions"] = partition
-        
-        # Build the dataset
-        job = dataset.build(**build_params)
-        
-        # Wait for completion and get result
-        job_result = job.wait_for_completion()
-        
-        return {
-            "status": "ok",
-            "dataset_name": dataset_name,
-            "job_id": job.id,
-            "job_status": job_result.get_outcome(),
-            "job_start_time": job_result.get_start_time(),
-            "job_end_time": job_result.get_end_time(),
-            "build_mode": mode,
-            "partition": partition,
-            "message": f"Dataset '{dataset_name}' built successfully"
-        }
-        
+        dataset = get_project(project_key).get_dataset(dataset_name)
+        # build(wait=True) raises on failure: wait here to keep the job state.
+        job = dataset.build(
+            job_type=mode or "NON_RECURSIVE_FORCED_BUILD",
+            partitions=partition,
+            wait=False,
+        )
+        if wait:
+            wait_for_job(job)
+        job_info = job_summary(job)
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to build dataset '{dataset_name}': {str(e)}"
-        }
+        return error(f"Failed to build dataset '{dataset_name}': {e}")
+
+    if not wait:
+        return ok(
+            dataset_name=dataset_name,
+            job=job_info,
+            message=f"Job {job.id} started; follow it with get_job_details",
+        )
+
+    if job_info["state"] != "DONE":
+        return error(
+            f"Build of '{dataset_name}' (job {job.id}) ended with state "
+            f"{job_info['state']}; see get_job_details for the log",
+            "job_failed",
+            dataset_name=dataset_name,
+            job=job_info,
+        )
+
+    return ok(
+        dataset_name=dataset_name,
+        job=job_info,
+        build_mode=mode,
+        partition=partition,
+        message=f"Dataset '{dataset_name}' built successfully",
+    )
 
 
 def inspect_dataset_schema(
-    project_key: str,
-    dataset_name: str
-) -> Dict[str, Any]:
+    project_key: str, dataset_name: str
+) -> dict[str, Any]:
     """
     Inspect the schema of a dataset.
-    
+
     Args:
         project_key: The project key containing the dataset
         dataset_name: Name of the dataset to inspect
-    
+
     Returns:
         Dict with dataset schema information or error message
     """
     try:
-        project = get_project(project_key)
-        dataset = project.get_dataset(dataset_name)
-        
-        # Get the schema
+        dataset = get_project(project_key).get_dataset(dataset_name)
         schema = dataset.get_schema()
-        
-        # Process schema columns
+
         columns = []
-        for col in schema.get('columns', []):
-            column_info = {
-                "name": col.get('name'),
-                "type": col.get('type'),
-                "meaning": col.get('meaning'),
-                "comment": col.get('comment', ''),
-                "nullable": col.get('nullable', True)
+        for col in schema.get("columns", []):
+            info = {
+                "name": col.get("name"),
+                "type": col.get("type"),
+                "meaning": col.get("meaning"),
+                "comment": col.get("comment", ""),
             }
-            
-            # Add type-specific information
-            if col.get('type') == 'string':
-                column_info['max_length'] = col.get('maxLength')
-            elif col.get('type') in ['int', 'bigint', 'float', 'double']:
-                column_info['min_value'] = col.get('minValue')
-                column_info['max_value'] = col.get('maxValue')
-            elif col.get('type') == 'array':
-                column_info['array_type'] = col.get('arrayType')
-            elif col.get('type') == 'map':
-                column_info['key_type'] = col.get('keyType')
-                column_info['value_type'] = col.get('valueType')
-            elif col.get('type') == 'object':
-                column_info['object_fields'] = col.get('objectFields', [])
-            
-            columns.append(column_info)
-        
-        return {
-            "status": "ok",
-            "dataset_name": dataset_name,
-            "schema": {
+            if col.get("maxLength") is not None:
+                info["max_length"] = col.get("maxLength")
+            if col.get("type") == "array":
+                info["array_content"] = col.get("arrayContent")
+            elif col.get("type") == "map":
+                info["map_keys"] = col.get("mapKeys")
+                info["map_values"] = col.get("mapValues")
+            elif col.get("type") == "object":
+                info["object_fields"] = col.get("objectFields", [])
+            columns.append(info)
+
+        return ok(
+            dataset_name=dataset_name,
+            schema={
                 "columns": columns,
-                "user_modified": schema.get('userModified', False),
-                "column_count": len(columns)
+                "user_modified": schema.get("userModified", False),
+                "column_count": len(columns),
             },
-            "message": f"Schema for dataset '{dataset_name}' retrieved successfully"
-        }
-        
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to inspect schema for dataset '{dataset_name}': {str(e)}"
-        }
+        return error(
+            f"Failed to inspect schema for dataset '{dataset_name}': {e}"
+        )
 
 
 def check_dataset_metrics(
-    project_key: str,
-    dataset_name: str
-) -> Dict[str, Any]:
+    project_key: str, dataset_name: str
+) -> dict[str, Any]:
     """
-    Check the metrics of a dataset.
-    
+    Get the last computed value of every metric of a dataset.
+
     Args:
         project_key: The project key containing the dataset
         dataset_name: Name of the dataset to check metrics for
-    
+
     Returns:
-        Dict with dataset metrics information or error message
+        Dict {metric_id: {"value", "partition", "computed_on"}}
     """
     try:
-        project = get_project(project_key)
-        dataset = project.get_dataset(dataset_name)
-        
-        # Get the last metric values
-        metrics = dataset.get_last_metric_values()
-        
-        # Process metrics data
-        processed_metrics = {}
-        
-        if metrics:
-            # Basic metrics
-            if 'basic' in metrics:
-                basic_metrics = metrics['basic']
-                processed_metrics['basic'] = {
-                    'record_count': basic_metrics.get('COUNT_RECORDS', {}).get('value'),
-                    'column_count': basic_metrics.get('COUNT_COLUMNS', {}).get('value'),
-                    'file_size': basic_metrics.get('SIZE_BYTES', {}).get('value'),
-                    'file_count': basic_metrics.get('COUNT_FILES', {}).get('value')
-                }
-            
-            # Validity metrics
-            if 'validity' in metrics:
-                validity_metrics = metrics['validity']
-                processed_metrics['validity'] = {}
-                for metric_name, metric_data in validity_metrics.items():
-                    processed_metrics['validity'][metric_name] = {
-                        'value': metric_data.get('value'),
-                        'valid': metric_data.get('valid', True)
-                    }
-            
-            # Column statistics
-            if 'columnStats' in metrics:
-                column_stats = metrics['columnStats']
-                processed_metrics['column_stats'] = {}
-                for column_name, stats in column_stats.items():
-                    processed_metrics['column_stats'][column_name] = {
-                        'min': stats.get('min', {}).get('value'),
-                        'max': stats.get('max', {}).get('value'),
-                        'avg': stats.get('avg', {}).get('value'),
-                        'std': stats.get('std', {}).get('value'),
-                        'count_distinct': stats.get('countDistinct', {}).get('value'),
-                        'count_non_null': stats.get('countNonNull', {}).get('value')
-                    }
-        
-        return {
-            "status": "ok",
-            "dataset_name": dataset_name,
-            "metrics": processed_metrics,
-            "has_metrics": bool(metrics),
-            "message": f"Metrics for dataset '{dataset_name}' retrieved successfully"
-        }
-        
+        dataset = get_project(project_key).get_dataset(dataset_name)
+        raw = dataset.get_last_metric_values().get_raw() or {}
+
+        metrics = {}
+        for item in raw.get("metrics", []):
+            metric_id = (item.get("metric") or {}).get("id")
+            values = item.get("lastValues") or []
+            if not metric_id or not values:
+                continue
+            # Global value first (NP = not partitioned, ALL = whole dataset).
+            point = next(
+                (v for v in values if v.get("partition") in ("NP", "ALL")),
+                values[0],
+            )
+            metrics[metric_id] = {
+                "value": point.get("value"),
+                "partition": point.get("partition"),
+                "computed_on": iso(point.get("time")),
+            }
+
+        return ok(
+            dataset_name=dataset_name,
+            metrics=metrics,
+            has_metrics=bool(metrics),
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to check metrics for dataset '{dataset_name}': {str(e)}"
-        }
+        return error(
+            f"Failed to check metrics for dataset '{dataset_name}': {e}"
+        )
 
 
 def list_datasets(
-    project_key: str,
-    dataset_type: Optional[str] = None
-) -> Dict[str, Any]:
+    project_key: str, dataset_type: Optional[str] = None
+) -> dict[str, Any]:
     """
     List all datasets in a project, optionally filtered by type.
-    
+
     Args:
         project_key: The project key to list datasets from
-        dataset_type: Optional filter by dataset type
-    
+        dataset_type: Optional filter by dataset type (e.g. 'PostgreSQL')
+
     Returns:
         Dict with list of datasets or error message
     """
     try:
-        project = get_project(project_key)
-        
-        # Get all datasets
-        all_datasets = project.list_datasets()
-        
-        # Filter by type if specified
-        if dataset_type:
-            filtered_datasets = [d for d in all_datasets if d.get("type") == dataset_type]
-        else:
-            filtered_datasets = all_datasets
-        
-        return {
-            "status": "ok",
-            "datasets": [
-                {
-                    "name": dataset.get("name"),
-                    "type": dataset.get("type"),
-                    "id": dataset.get("id"),
-                    "tags": dataset.get("tags", []),
-                    "managed": dataset.get("managed", False),
-                    "flow_options": dataset.get("flowOptions", {}),
-                    "connection": dataset.get("params", {}).get("connection")
-                }
-                for dataset in filtered_datasets
-            ],
-            "total_count": len(filtered_datasets),
-            "project_key": project_key
-        }
-        
+        all_datasets = get_project(project_key).list_datasets()
+
+        datasets = [
+            {
+                "name": d.get("name"),
+                "type": d.get("type"),
+                "managed": d.get("managed", False),
+                "connection": (d.get("params") or {}).get("connection"),
+                "partitioned": bool(
+                    (d.get("partitioning") or {}).get("dimensions")
+                ),
+                "tags": d.get("tags", []),
+            }
+            for d in all_datasets
+            if not dataset_type or d.get("type") == dataset_type
+        ]
+
+        return ok(
+            datasets=datasets,
+            total_count=len(datasets),
+            project_key=project_key,
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to list datasets in project '{project_key}': {str(e)}"
-        }
+        return error(
+            f"Failed to list datasets in project '{project_key}': {e}"
+        )
 
 
-def get_dataset_info(
-    project_key: str,
-    dataset_name: str
-) -> Dict[str, Any]:
+def get_dataset_info(project_key: str, dataset_name: str) -> dict[str, Any]:
     """
     Get detailed information about a dataset.
-    
+
     Args:
         project_key: The project key containing the dataset
         dataset_name: Name of the dataset to inspect
-    
+
     Returns:
         Dict with dataset information or error message
     """
     try:
-        project = get_project(project_key)
-        dataset = project.get_dataset(dataset_name)
-        
-        # Get dataset metadata
-        metadata = dataset.get_metadata()
-        
-        # Get dataset settings
+        dataset = get_project(project_key).get_dataset(dataset_name)
         settings = dataset.get_settings()
-        
-        # Get dataset type and configuration
-        dataset_type = dataset.get_type()
-        
-        return {
-            "status": "ok",
-            "dataset_info": {
-                "name": dataset_name,
-                "type": dataset_type,
-                "id": dataset.id,
-                "description": metadata.get("description", ""),
-                "tags": metadata.get("tags", []),
-                "managed": dataset.get_type() == "Managed",
-                "creation_date": metadata.get("creationDate"),
-                "last_modified": metadata.get("lastModifiedDate"),
-                "last_modified_by": metadata.get("lastModifiedBy", {}).get("login"),
-                "custom_fields": metadata.get("customFields", {}),
-                "flow_options": metadata.get("flowOptions", {}),
-                "settings": {
-                    "format_type": getattr(settings, 'format_type', None),
-                    "connection": getattr(settings, 'connection', None),
-                    "path": getattr(settings, 'path', None),
-                    "table": getattr(settings, 'table', None),
-                    "schema": getattr(settings, 'schema', None)
-                }
+        raw = settings.get_raw()
+        params = settings.get_raw_params() or {}
+        partitioning = raw.get("partitioning") or {}
+
+        info = {
+            "name": dataset_name,
+            "type": settings.type,
+            "managed": raw.get("managed", False),
+            "description": settings.description or "",
+            "tags": settings.tags or [],
+            "custom_fields": settings.custom_fields or {},
+            "connection": params.get("connection"),
+            "path": params.get("path"),
+            "schema": params.get("schema"),
+            "table": params.get("table"),
+            "catalog": params.get("catalog"),
+            "format_type": raw.get("formatType"),
+            "partitioning": [
+                {"name": d.get("name"), "type": d.get("type")}
+                for d in partitioning.get("dimensions", [])
+            ],
+            "column_count": len(settings.schema_columns or []),
+        }
+
+        try:
+            build = dataset.get_info()
+            info["last_build"] = {
+                "start_time": iso(build.last_build_start_time),
+                "end_time": iso(build.last_build_end_time),
+                "successful": build.is_last_build_successful,
             }
-        }
-        
+        except Exception as e:  # No build information on some dataset types
+            info["last_build"] = {"error": str(e)}
+
+        return ok(dataset_info=info)
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to get dataset info for '{dataset_name}': {str(e)}"
-        }
+        return error(f"Failed to get dataset info for '{dataset_name}': {e}")
 
 
 def clear_dataset(
-    project_key: str,
-    dataset_name: str,
-    partition: Optional[str] = None
-) -> Dict[str, Any]:
+    project_key: str, dataset_name: str, partition: Optional[str] = None
+) -> dict[str, Any]:
     """
     Clear the data from a dataset.
-    
+
     Args:
         project_key: The project key containing the dataset
         dataset_name: Name of the dataset to clear
-        partition: Optional partition to clear (for partitioned datasets)
-    
+        partition: Optional partitions to clear (for partitioned datasets)
+
     Returns:
         Dict with status and clear operation details or error message
     """
     try:
-        project = get_project(project_key)
-        dataset = project.get_dataset(dataset_name)
-        
-        # Prepare clear parameters
-        clear_params = {}
-        if partition:
-            clear_params["partitions"] = partition
-        
-        # Clear the dataset
-        result = dataset.clear(**clear_params)
-        
-        return {
-            "status": "ok",
-            "dataset_name": dataset_name,
-            "partition": partition,
-            "clear_result": result,
-            "message": f"Dataset '{dataset_name}' cleared successfully"
-        }
-        
+        dataset = get_project(project_key).get_dataset(dataset_name)
+        dataset.clear(partitions=partition)
+
+        return ok(
+            dataset_name=dataset_name,
+            partition=partition,
+            message=f"Dataset '{dataset_name}' cleared successfully",
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to clear dataset '{dataset_name}': {str(e)}"
-        }
+        return error(f"Failed to clear dataset '{dataset_name}': {e}")

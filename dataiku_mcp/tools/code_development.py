@@ -3,137 +3,95 @@ Code and recipe development tools for Dataiku MCP integration.
 """
 
 import ast
-import re
 import json
-import tempfile
-import traceback
-from typing import Dict, Any, List, Optional
-from dataiku_mcp.client import get_client, get_project
+import re
+from itertools import islice
+from typing import Any, Dict, List, Optional
 
-def get_recipe_code(
-    project_key: str,
-    recipe_name: str
-) -> Dict[str, Any]:
+from dataiku_mcp.client import get_project
+from dataiku_mcp.tools._common import CODE_RECIPE_TYPES, error, flat_refs, ok
+
+SQL_RECIPE_TYPES = ("sql_script", "sql_query", "spark_sql_query")
+PYTHON_RECIPE_TYPES = ("python", "pyspark", "cpython")
+LANGUAGES = {
+    "python": "python",
+    "pyspark": "python",
+    "cpython": "python",
+    "r": "r",
+    "sparkr": "r",
+    "sql_script": "sql",
+    "sql_query": "sql",
+    "spark_sql_query": "sql",
+    "spark_scala": "scala",
+    "shell": "shell",
+}
+
+
+def _recipe_context(project: Any, recipe_name: str) -> Dict[str, Any]:
+    """Type, inputs, outputs, code and settings of a recipe."""
+    settings = project.get_recipe(recipe_name).get_settings()
+    recipe_type = settings.type
+    return {
+        "settings": settings,
+        "type": recipe_type,
+        "inputs": flat_refs(settings.get_recipe_inputs()),
+        "outputs": flat_refs(settings.get_recipe_outputs()),
+        "code": (settings.str_payload or "")
+        if recipe_type in CODE_RECIPE_TYPES
+        else None,
+    }
+
+
+def get_recipe_code(project_key: str, recipe_name: str) -> Dict[str, Any]:
     """
-    Extract actual Python/SQL code from recipes.
-    
+    Extract the code of a code recipe, or the configuration of a visual one.
+
     Args:
         project_key: The project key
         recipe_name: Name of the recipe
-        
+
     Returns:
         Dict containing code and recipe information
     """
     try:
-        project = get_project(project_key)
-        recipe = project.get_recipe(recipe_name)
-        settings = recipe.get_settings()
-        
-        # Get recipe metadata
-        try:
-            recipe_definition = recipe.get_definition()
-            recipe_type = recipe_definition.get("type", "unknown")
-            inputs = [inp["ref"] for inp in recipe_definition.get("inputs", [])]
-            outputs = [out["ref"] for out in recipe_definition.get("outputs", [])]
-        except AttributeError:
-            # Fallback for older API versions
-            try:
-                recipe_def_payload = recipe.get_definition_and_payload()
-                payload = recipe_def_payload.get_payload()
-                if isinstance(payload, dict):
-                    recipe_type = payload.get("type", "unknown")
-                else:
-                    recipe_type = "unknown"
-                inputs = []
-                outputs = []
-            except:
-                recipe_type = "unknown"
-                inputs = []
-                outputs = []
-        
+        ctx = _recipe_context(get_project(project_key), recipe_name)
+        settings = ctx["settings"]
+
         recipe_info = {
             "name": recipe_name,
-            "type": recipe_type,
-            "engine": settings.get_recipe_params().get("engine", "unknown"),
-            "inputs": inputs,
-            "outputs": outputs
+            "type": ctx["type"],
+            "engine": (settings.raw_params or {}).get("engineType"),
+            "inputs": ctx["inputs"],
+            "outputs": ctx["outputs"],
         }
-        
-        # Extract code based on recipe type
-        code = ""
-        code_info = {}
-        
-        if recipe_type in ["python", "r", "scala"]:
-            # Code recipes
-            code = settings.get_code()
-            code_info = {
-                "language": recipe_type,
-                "line_count": len(code.split('\n')) if code else 0,
-                "char_count": len(code) if code else 0
-            }
-            
-        elif recipe_type == "sql":
-            # SQL recipes
-            code = settings.get_code()
-            code_info = {
-                "language": "sql",
-                "line_count": len(code.split('\n')) if code else 0,
-                "char_count": len(code) if code else 0
-            }
-            
-        elif recipe_type == "pyspark":
-            # PySpark recipes
-            code = settings.get_code()
-            code_info = {
-                "language": "python",
-                "engine": "pyspark",
-                "line_count": len(code.split('\n')) if code else 0,
-                "char_count": len(code) if code else 0
-            }
-            
-        elif recipe_type in ["join", "grouping", "window", "distinct", "sort", "topn", "sync"]:
-            # Visual recipes - extract configuration as "pseudo-code"
-            recipe_params = settings.get_recipe_params()
-            code = json.dumps(recipe_params, indent=2)
-            code_info = {
-                "language": "json",
-                "type": "visual_recipe_config",
-                "line_count": len(code.split('\n')) if code else 0,
-                "char_count": len(code) if code else 0
-            }
-            
+
+        if ctx["code"] is not None:
+            code = ctx["code"]
+            language = LANGUAGES.get(ctx["type"], ctx["type"])
+            kind = "code"
         else:
-            # Other recipe types
-            try:
-                code = settings.get_code()
-                code_info = {
-                    "language": "unknown",
-                    "line_count": len(code.split('\n')) if code else 0,
-                    "char_count": len(code) if code else 0
-                }
-            except:
-                # For recipes without code, get the configuration
-                recipe_params = settings.get_recipe_params()
-                code = json.dumps(recipe_params, indent=2)
-                code_info = {
-                    "language": "json",
-                    "type": "recipe_config",
-                    "line_count": len(code.split('\n')) if code else 0,
-                    "char_count": len(code) if code else 0
-                }
-        
-        return {
-            "status": "ok",
-            "recipe_info": recipe_info,
-            "code": code,
-            "code_info": code_info
-        }
-        
+            # Visual recipe: the "code" is its JSON configuration.
+            code = json.dumps(
+                {"params": settings.raw_params, "payload": settings.obj_payload},
+                indent=2,
+                ensure_ascii=False,
+            )
+            language = "json"
+            kind = "visual_recipe_config"
+
+        return ok(
+            recipe_info=recipe_info,
+            code=code,
+            code_info={
+                "language": language,
+                "type": kind,
+                "line_count": len(code.splitlines()),
+                "char_count": len(code),
+            },
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to get recipe code for '{recipe_name}': {str(e)}"
-        }
+        return error(f"Failed to get recipe code for '{recipe_name}': {e}")
 
 
 def validate_recipe_syntax(
@@ -153,29 +111,25 @@ def validate_recipe_syntax(
         Dict containing validation results
     """
     try:
-        project = get_project(project_key)
-        recipe = project.get_recipe(recipe_name)
-        
-        # Get code to validate
+        ctx = _recipe_context(get_project(project_key), recipe_name)
+        recipe_type = ctx["type"]
+
+        if ctx["code"] is None:
+            return error(
+                f"Recipe '{recipe_name}' (type {recipe_type}) is not a code "
+                "recipe",
+                "invalid_argument",
+            )
         if code is None:
-            settings = recipe.get_settings()
-            code = settings.get_code()
-        
-        if not code or not code.strip():
-            return {
-                "status": "ok",
-                "valid": True,
-                "message": "No code to validate (empty recipe)",
-                "errors": []
-            }
-        
-        try:
-            recipe_definition = recipe.get_definition()
-            recipe_type = recipe_definition.get("type", "unknown")
-        except AttributeError:
-            # Fallback for older API versions
-            recipe_def_payload = recipe.get_definition_and_payload()
-            recipe_type = recipe_def_payload.get_payload().get("type", "unknown")
+            code = ctx["code"]
+
+        if not code.strip():
+            return ok(
+                valid=True,
+                message="No code to validate (empty recipe)",
+                errors=[],
+            )
+
         validation_results = {
             "recipe_name": recipe_name,
             "recipe_type": recipe_type,
@@ -187,7 +141,7 @@ def validate_recipe_syntax(
         warnings = []
         
         # Validate based on recipe type
-        if recipe_type in ["python", "pyspark"]:
+        if recipe_type in PYTHON_RECIPE_TYPES:
             # Python syntax validation
             try:
                 ast.parse(code)
@@ -228,7 +182,7 @@ def validate_recipe_syntax(
                     "message": "Code doesn't seem to write to output datasets"
                 })
                 
-        elif recipe_type == "sql":
+        elif recipe_type in SQL_RECIPE_TYPES:
             # SQL syntax validation (basic)
             sql_errors = []
             
@@ -296,7 +250,7 @@ def validate_recipe_syntax(
             try:
                 json.loads(code)
                 validation_results["json_valid"] = True
-            except json.JSONDecodeError as e:
+            except json.JSONDecodeError:
                 validation_results["json_valid"] = False
                 # This might not be JSON, which is fine for some recipe types
         
@@ -338,30 +292,10 @@ def test_recipe_dry_run(
     """
     try:
         project = get_project(project_key)
-        recipe = project.get_recipe(recipe_name)
-        settings = recipe.get_settings()
-        
-        # Get recipe information
-        try:
-            recipe_def = recipe.get_definition()
-            inputs = [inp["ref"] for inp in recipe_def["inputs"]]
-            outputs = [out["ref"] for out in recipe_def["outputs"]]
-            recipe_type = recipe_def.get("type", "unknown")
-        except AttributeError:
-            # Fallback for older API versions
-            try:
-                recipe_def_payload = recipe.get_definition_and_payload()
-                payload = recipe_def_payload.get_payload()
-                if isinstance(payload, dict):
-                    recipe_type = payload.get("type", "unknown")
-                else:
-                    recipe_type = "unknown"
-                inputs = []
-                outputs = []
-            except:
-                recipe_type = "unknown"
-                inputs = []
-                outputs = []
+        ctx = _recipe_context(project, recipe_name)
+        recipe_type = ctx["type"]
+        inputs = ctx["inputs"]
+        outputs = ctx["outputs"]
         test_results = {
             "recipe_name": recipe_name,
             "recipe_type": recipe_type,
@@ -379,13 +313,13 @@ def test_recipe_dry_run(
                 
                 # Try to get sample data
                 try:
-                    sample_df = input_dataset.get_dataframe(limit=sample_rows)
+                    sample = list(islice(input_dataset.iter_rows(), sample_rows))
                     input_info = {
                         "name": input_name,
                         "status": "ok",
                         "schema_columns": len(schema["columns"]),
-                        "sample_rows": len(sample_df),
-                        "sample_columns": list(sample_df.columns) if hasattr(sample_df, 'columns') else []
+                        "sample_rows": len(sample),
+                        "sample_columns": [c["name"] for c in schema["columns"]],
                     }
                 except Exception as e:
                     input_info = {
@@ -430,9 +364,9 @@ def test_recipe_dry_run(
         test_results["output_checks"] = output_checks
         
         # For Python recipes, try to validate the code structure
-        if recipe_type in ["python", "pyspark"]:
+        if recipe_type in PYTHON_RECIPE_TYPES:
             try:
-                code = settings.get_code()
+                code = ctx["code"]
                 
                 # Parse the code to check for basic structure
                 tree = ast.parse(code)
@@ -484,7 +418,7 @@ def test_recipe_dry_run(
         if input_errors > 0:
             test_summary["recommendations"].append("Fix input dataset access issues before running")
         
-        if recipe_type in ["python", "pyspark"]:
+        if recipe_type in PYTHON_RECIPE_TYPES:
             code_analysis = test_results.get("code_analysis", {})
             if not code_analysis.get("has_dataiku_import", False):
                 test_summary["recommendations"].append("Add 'import dataiku' to your code")
@@ -528,37 +462,11 @@ def get_generated_sql(
         Dict containing generated SQL and recipe information
     """
     try:
-        client = get_client()
-        project = client.get_project(project_key)
-        recipe = project.get_recipe(recipe_name)
-        
-        # Get recipe metadata
-        try:
-            recipe_def = recipe.get_definition()
-            recipe_type = recipe_def.get("type", "unknown")
-            
-            # Get inputs from the recipe definition
-            inputs_def = recipe_def.get("inputs", {})
-            inputs = []
-            for role, items in inputs_def.items():
-                if isinstance(items, dict) and "items" in items:
-                    inputs.extend([item.get("ref") for item in items.get("items", [])])
-                elif isinstance(items, list):
-                    inputs.extend([item.get("ref") for item in items])
-            
-            # Get outputs from the recipe definition
-            outputs_def = recipe_def.get("outputs", {})
-            outputs = []
-            for role, items in outputs_def.items():
-                if isinstance(items, dict) and "items" in items:
-                    outputs.extend([item.get("ref") for item in items.get("items", [])])
-                elif isinstance(items, list):
-                    outputs.extend([item.get("ref") for item in items])
-        except Exception as e:
-            recipe_type = "unknown"
-            inputs = []
-            outputs = []
-        
+        ctx = _recipe_context(get_project(project_key), recipe_name)
+        recipe_type = ctx["type"]
+        inputs = ctx["inputs"]
+        outputs = ctx["outputs"]
+
         recipe_info = {
             "name": recipe_name,
             "type": recipe_type,
@@ -572,16 +480,14 @@ def get_generated_sql(
         additional_info = {}
         
         # Method 1: For SQL recipe type, get code directly
-        if recipe_type == "sql":
-            settings = recipe.get_settings()
-            generated_sql = settings.get_code()
+        if recipe_type in SQL_RECIPE_TYPES:
+            generated_sql = ctx["code"]
             method_used = "direct_sql_code"
         
         # Method 2: For Shaker recipes, extract the preparation script and try to get SQL
-        elif recipe_type == "shaker":
+        elif recipe_type in ("shaker", "prepare"):
             try:
-                settings = recipe.get_settings()
-                raw_payload = settings.get_json_payload()
+                raw_payload = ctx["settings"].get_json_payload()
                 
                 # Extract the preparation steps (shaker script)
                 shaker_script = raw_payload.get("script", {})
@@ -645,8 +551,7 @@ def get_generated_sql(
         # Method 3: For other visual recipes (join, grouping, etc.)
         elif recipe_type in ["join", "grouping", "window", "distinct", "sort", "topn", "split", "vstack", "sampling"]:
             try:
-                settings = recipe.get_settings()
-                raw_payload = settings.get_json_payload()
+                raw_payload = ctx["settings"].get_json_payload()
                 
                 # Try to generate SQL based on recipe type
                 if recipe_type == "join":
@@ -672,60 +577,17 @@ def get_generated_sql(
             except Exception as e:
                 additional_info["visual_recipe_error"] = str(e)
         
-        # Method 4: Try to get SQL from job logs (last successful run)
-        if generated_sql is None or method_used == "recipe_config_fallback":
-            try:
-                # Get recent jobs for this recipe
-                jobs = project.list_jobs()
-                recipe_jobs = []
-                
-                for job in jobs:
-                    job_def = job.get_definition()
-                    if job_def.get("type") == "NON_RECURSIVE_FORCED_BUILD":
-                        # Check if this job is for our recipe
-                        outputs_list = job_def.get("outputs", [])
-                        for output_item in outputs_list:
-                            if output_item.get("type") == "DATASET":
-                                if output_item.get("itemId") in outputs:
-                                    recipe_jobs.append(job)
-                                    break
-                
-                # Get the most recent job's logs
-                if recipe_jobs:
-                    latest_job = recipe_jobs[0]
-                    job_status = latest_job.get_status()
-                    
-                    # Try to get activities/logs
-                    try:
-                        activities = latest_job.get_log()
-                        if activities:
-                            # Search for SQL in logs
-                            sql_patterns = []
-                            for line in activities.split('\n'):
-                                if 'SELECT' in line.upper() or 'INSERT' in line.upper():
-                                    sql_patterns.append(line)
-                            
-                            if sql_patterns:
-                                additional_info["sql_from_logs"] = sql_patterns[:10]  # First 10 matches
-                    except:
-                        pass
-                        
-            except Exception as e:
-                additional_info["job_logs_error"] = str(e)
-        
         # Fallback: provide recipe configuration
         if generated_sql is None:
             try:
-                settings = recipe.get_settings()
-                recipe_params = settings.get_recipe_params()
-                generated_sql = json.dumps(recipe_params, indent=2)
+                generated_sql = json.dumps(ctx["settings"].raw_params, indent=2)
                 method_used = "recipe_config_fallback"
             except:
                 generated_sql = "SQL generation not available for this recipe type"
                 method_used = "unavailable"
         
         result = {
-            "status": "ok" if generated_sql else "warning",
+            "status": "ok",
             "recipe_info": recipe_info,
             "generated_sql": generated_sql,
             "method_used": method_used
@@ -740,11 +602,7 @@ def get_generated_sql(
         return result
         
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to get generated SQL for '{recipe_name}': {str(e)}",
-            "traceback": traceback.format_exc()
-        }
+        return error(f"Failed to get generated SQL for '{recipe_name}': {e}")
 
 
 def _generate_sql_from_shaker_steps(inputs: List[str], outputs: List[str], steps: List[Dict]) -> str:
@@ -755,13 +613,12 @@ def _generate_sql_from_shaker_steps(inputs: List[str], outputs: List[str], steps
     output_table = outputs[0] if outputs else "output_table"
     
     sql_parts = []
-    sql_parts.append(f"-- Generated SQL representation of Shaker recipe")
+    sql_parts.append("-- Generated SQL representation of Shaker recipe")
     sql_parts.append(f"-- Input: {input_table}")
     sql_parts.append(f"-- Output: {output_table}")
     sql_parts.append(f"-- Total steps: {len(steps)}")
     sql_parts.append("")
     
-    select_columns = ["*"]
     where_clauses = []
     column_transforms = []
     column_renames = {}
@@ -773,7 +630,6 @@ def _generate_sql_from_shaker_steps(inputs: List[str], outputs: List[str], steps
             continue
             
         step_type = step.get("type", "")
-        params = step.get("params", {})
         
         sql_parts.append(f"-- Step {step.get('step_number')}: {step_type}")
         

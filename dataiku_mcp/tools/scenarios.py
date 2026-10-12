@@ -5,717 +5,517 @@ This module provides functions for creating, updating, deleting, and managing sc
 in Dataiku DSS projects through the dataiku-api-client.
 """
 
-from typing import Dict, List, Optional, Union, Any
-import dataikuapi
-import dataikuapi.dss.project
-import dataikuapi.dss.scenario
-from dataiku_mcp.client import get_client, get_project
+from typing import Any, Optional
+
+from dataiku_mcp.client import get_project
+from dataiku_mcp.tools._common import (
+    error,
+    iso,
+    ok,
+    scenario_run_summary,
+    trigger_summary,
+)
+
+SCENARIO_TYPES = ("step_based", "custom_python")
+TRIGGER_TYPES = ("periodic", "hourly", "daily", "monthly", "raw")
 
 
 def create_scenario(
     project_key: str,
     scenario_name: str,
     scenario_type: str,
-    definition: Optional[Dict[str, Any]] = None
-) -> Dict[str, Any]:
+    definition: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     """
     Create a new scenario in a Dataiku DSS project.
-    
+
     Args:
         project_key: The project key where the scenario will be created
         scenario_name: Name of the scenario to create
         scenario_type: Type of scenario ('step_based' or 'custom_python')
         definition: Optional scenario definition dict. If None, defaults to {'params': {}}
-    
+
     Returns:
         Dict with status and scenario details or error message
     """
-    # Validate scenario type before attempting connection
-    valid_types = ['step_based', 'custom_python']
-    if scenario_type not in valid_types:
-        return {
-            "status": "error",
-            "message": f"Invalid scenario type '{scenario_type}'. Must be one of: {valid_types}"
-        }
-    
-    try:
-        project = get_project(project_key)
-        
-        # Set default definition if not provided
-        if definition is None:
-            definition = {'params': {}}
-        
-        # Create the scenario
-        scenario = project.create_scenario(
-            scenario_name=scenario_name,
-            type=scenario_type,
-            definition=definition
+    if scenario_type not in SCENARIO_TYPES:
+        return error(
+            f"Invalid scenario type '{scenario_type}'. "
+            f"Must be one of: {list(SCENARIO_TYPES)}",
+            "invalid_argument",
         )
-        
-        return {
-            "status": "ok",
-            "scenario_name": scenario_name,
-            "scenario_id": scenario.id,
-            "scenario_type": scenario_type,
-            "project_key": project_key,
-            "message": f"Scenario '{scenario_name}' created successfully"
-        }
-        
+
+    try:
+        scenario = get_project(project_key).create_scenario(
+            scenario_name,
+            scenario_type,
+            definition=definition or {"params": {}},
+        )
+        return ok(
+            scenario_name=scenario_name,
+            scenario_id=scenario.id,
+            scenario_type=scenario_type,
+            project_key=project_key,
+            message=f"Scenario '{scenario_name}' created successfully",
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to create scenario '{scenario_name}': {str(e)}"
-        }
+        return error(f"Failed to create scenario '{scenario_name}': {e}")
 
 
 def update_scenario(
-    project_key: str,
-    scenario_id: str,
-    **kwargs
-) -> Dict[str, Any]:
+    project_key: str, scenario_id: str, **kwargs: Any
+) -> dict[str, Any]:
     """
     Update an existing scenario's settings.
-    
+
     Args:
         project_key: The project key containing the scenario
         scenario_id: ID of the scenario to update
         **kwargs: Update parameters including:
             - name: New scenario name
             - description: Scenario description
-            - active: Whether the scenario is active (bool)
+            - active: Whether the scenario auto-triggers run (bool)
             - tags: List of tags
-            - custom_fields: Dict of custom metadata fields
-            - definition: Scenario definition dict
-            - step_script: Python script code to update in a custom_python step
-            - step_index: Index of the step to update (default: 0)
-    
+            - params: Dict merged into the scenario "params"
+            - script: Python script (custom_python scenarios)
+            - step_script + step_index: script of a custom_python step
+              (step_based scenarios, default step_index 0)
+
     Returns:
         Dict with status and update details or error message
     """
+    supported = {
+        "name",
+        "description",
+        "active",
+        "tags",
+        "params",
+        "script",
+        "step_script",
+        "step_index",
+    }
+    unknown = sorted(set(kwargs) - supported)
+    if unknown:
+        return error(
+            f"Unsupported fields: {unknown}. Supported: {sorted(supported)}",
+            "invalid_argument",
+        )
+
     try:
-        project = get_project(project_key)
-        scenario = project.get_scenario(scenario_id)
-        
+        settings = get_project(project_key).get_scenario(scenario_id).get_settings()
+        raw = settings.get_raw()
         updated_fields = []
-        
-        # Update scenario metadata if provided
-        if any(key in kwargs for key in ['description', 'tags', 'custom_fields']):
-            metadata = scenario.get_metadata()
-            
-            if 'description' in kwargs:
-                metadata['description'] = kwargs['description']
-                updated_fields.append('description')
-            
-            if 'tags' in kwargs:
-                metadata['tags'] = kwargs['tags']
-                updated_fields.append('tags')
-            
-            if 'custom_fields' in kwargs:
-                if 'customFields' not in metadata:
-                    metadata['customFields'] = {}
-                metadata['customFields'].update(kwargs['custom_fields'])
-                updated_fields.append('custom_fields')
-            
-            scenario.set_metadata(metadata)
-        
-        # Update scenario settings
-        if any(key in kwargs for key in ['name', 'active', 'definition', 'step_script']):
-            settings = scenario.get_settings()
-            
-            if 'name' in kwargs:
-                settings.name = kwargs['name']
-                updated_fields.append('name')
-            
-            if 'active' in kwargs:
-                settings.active = kwargs['active']
-                updated_fields.append('active')
-            
-            if 'definition' in kwargs:
-                # Update the definition (this may not work with all DSS versions)
-                try:
-                    current_definition = settings.get_definition()
-                    current_definition.update(kwargs['definition'])
-                    settings.set_definition(current_definition)
-                    updated_fields.append('definition')
-                except AttributeError:
-                    # Fallback: direct update of settings data
-                    settings.data.update(kwargs['definition'])
-                    updated_fields.append('definition')
-            
-            if 'step_script' in kwargs:
-                # Update Python script in the first custom_python step
-                step_index = kwargs.get('step_index', 0)  # Default to first step
-                script_code = kwargs['step_script']
-                
-                # Access raw steps directly
-                raw_steps = settings.raw_steps
-                if step_index < len(raw_steps):
-                    step = raw_steps[step_index]
-                    if step.get('type') == 'custom_python':
-                        if 'params' not in step:
-                            step['params'] = {}
-                        step['params']['script'] = script_code
-                        updated_fields.append('step_script')
-                    else:
-                        raise ValueError(f"Step {step_index} is not a custom_python step")
-                else:
-                    raise ValueError(f"Step index {step_index} is out of range")
-            
-            settings.save()
-        
-        return {
-            "status": "ok",
-            "scenario_id": scenario_id,
-            "updated_fields": updated_fields,
-            "message": f"Scenario '{scenario_id}' updated successfully"
-        }
-        
+
+        for field in ("name", "description", "tags"):
+            if field in kwargs:
+                raw[field] = kwargs[field]
+                updated_fields.append(field)
+
+        if "active" in kwargs:
+            settings.active = bool(kwargs["active"])
+            updated_fields.append("active")
+
+        if "params" in kwargs:
+            raw.setdefault("params", {}).update(kwargs["params"])
+            updated_fields.append("params")
+
+        if "script" in kwargs:
+            if raw.get("type") != "custom_python":
+                return error(
+                    f"Scenario '{scenario_id}' is not a custom_python scenario",
+                    "invalid_argument",
+                )
+            settings.code = kwargs["script"]
+            updated_fields.append("script")
+
+        if "step_script" in kwargs:
+            steps = (raw.get("params") or {}).get("steps", [])
+            index = kwargs.get("step_index", 0)
+            if not 0 <= index < len(steps):
+                return error(
+                    f"Step index {index} is out of range (0-{len(steps) - 1})",
+                    "invalid_argument",
+                )
+            if steps[index].get("type") != "custom_python":
+                return error(
+                    f"Step {index} is not a custom_python step",
+                    "invalid_argument",
+                )
+            steps[index].setdefault("params", {})["script"] = kwargs[
+                "step_script"
+            ]
+            updated_fields.append("step_script")
+
+        settings.save()
+
+        return ok(
+            scenario_id=scenario_id,
+            updated_fields=updated_fields,
+            message=f"Scenario '{scenario_id}' updated successfully",
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to update scenario '{scenario_id}': {str(e)}"
-        }
+        return error(f"Failed to update scenario '{scenario_id}': {e}")
 
 
-def delete_scenario(
-    project_key: str,
-    scenario_id: str
-) -> Dict[str, Any]:
+def delete_scenario(project_key: str, scenario_id: str) -> dict[str, Any]:
     """
     Delete a scenario from a Dataiku DSS project.
-    
+
     Args:
         project_key: The project key containing the scenario
         scenario_id: ID of the scenario to delete
-    
+
     Returns:
         Dict with status and deletion details or error message
     """
     try:
-        project = get_project(project_key)
-        scenario = project.get_scenario(scenario_id)
-        
-        # Store scenario info before deletion
-        scenario_info = {
-            "id": scenario_id,
-            "name": getattr(scenario, 'name', scenario_id),
-            "type": getattr(scenario, 'type', 'unknown')
-        }
-        
-        # Delete the scenario
+        scenario = get_project(project_key).get_scenario(scenario_id)
+        raw = scenario.get_settings().get_raw()
         scenario.delete()
-        
-        return {
-            "status": "ok",
-            "deleted_scenario": scenario_info,
-            "message": f"Scenario '{scenario_id}' deleted successfully"
-        }
-        
+
+        return ok(
+            deleted_scenario={
+                "id": scenario_id,
+                "name": raw.get("name"),
+                "type": raw.get("type"),
+            },
+            message=f"Scenario '{scenario_id}' deleted successfully",
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to delete scenario '{scenario_id}': {str(e)}"
-        }
+        return error(f"Failed to delete scenario '{scenario_id}': {e}")
 
 
 def add_scenario_trigger(
-    project_key: str,
-    scenario_id: str,
-    trigger_type: str,
-    **params
-) -> Dict[str, Any]:
+    project_key: str, scenario_id: str, trigger_type: str, **params: Any
+) -> dict[str, Any]:
     """
     Add a trigger to a scenario.
-    
+
     Args:
         project_key: The project key containing the scenario
         scenario_id: ID of the scenario to add trigger to
-        trigger_type: Type of trigger ('time', 'dataset', 'periodic', 'hourly', 'daily', 'monthly')
+        trigger_type: 'periodic', 'hourly', 'daily', 'monthly' or 'raw'
         **params: Trigger-specific parameters:
-            For 'periodic': every_minutes (int)
-            For 'hourly': starting_hour (int), minute_of_hour (int), repeat_every (int)
-            For 'daily': hour (int), minute (int), year (int), month (int), day (int), repeat_every (int)
-            For 'monthly': day (int), hour (int), minute (int), year (int), month (int)
-            For 'dataset': dataset_name (str), project_key (str, optional)
-            For 'time': Use one of the specific time trigger types above
-    
+            periodic: every_minutes
+            hourly: minute_of_hour, starting_hour, repeat_every, timezone
+            daily: hour, minute, days (list of day names), repeat_every,
+                timezone
+            monthly: day, hour, minute, run_on, repeat_every, timezone
+            raw: trigger (a raw DSS trigger dict, e.g. copied from another
+                scenario with get_scenario_info; used for dataset or SQL
+                triggers)
+
     Returns:
         Dict with status and trigger details or error message
     """
-    # Validate trigger type before attempting connection
-    valid_trigger_types = ['periodic', 'hourly', 'daily', 'monthly', 'dataset']
-    if trigger_type == 'time':
-        return {
-            "status": "error",
-            "message": "Use specific time trigger types: periodic, hourly, daily, or monthly"
-        }
-    
-    if trigger_type not in valid_trigger_types:
-        return {
-            "status": "error",
-            "message": f"Unsupported trigger type '{trigger_type}'. Supported types: {', '.join(valid_trigger_types)}"
-        }
-    
-    # Validate dataset trigger parameters
-    if trigger_type == 'dataset' and 'dataset_name' not in params:
-        return {
-            "status": "error",
-            "message": "dataset_name is required for dataset triggers"
-        }
-    
+    if trigger_type not in TRIGGER_TYPES:
+        return error(
+            f"Unsupported trigger type '{trigger_type}'. "
+            f"Supported types: {list(TRIGGER_TYPES)}",
+            "invalid_argument",
+        )
+    if trigger_type == "raw" and not isinstance(params.get("trigger"), dict):
+        return error(
+            "A 'trigger' dict is required for raw triggers",
+            "invalid_argument",
+        )
+
     try:
-        project = get_project(project_key)
-        scenario = project.get_scenario(scenario_id)
-        settings = scenario.get_settings()
-        
-        # Map trigger types to actual methods
-        trigger_added = False
-        trigger_details = {"type": trigger_type}
-        
-        if trigger_type == 'periodic':
-            every_minutes = params.get('every_minutes', 60)
-            settings.add_periodic_trigger(every_minutes=every_minutes)
-            trigger_details['every_minutes'] = every_minutes
-            trigger_added = True
-            
-        elif trigger_type == 'hourly':
-            starting_hour = params.get('starting_hour', 0)
-            minute_of_hour = params.get('minute_of_hour', 0)
-            repeat_every = params.get('repeat_every', 1)
+        settings = get_project(project_key).get_scenario(scenario_id).get_settings()
+        tz = params.get("timezone", "SERVER")
+
+        if trigger_type == "periodic":
+            settings.add_periodic_trigger(
+                every_minutes=params.get("every_minutes", 60)
+            )
+        elif trigger_type == "hourly":
             settings.add_hourly_trigger(
-                starting_hour=starting_hour,
-                minute_of_hour=minute_of_hour,
-                repeat_every=repeat_every
+                minute_of_hour=params.get("minute_of_hour", 0),
+                starting_hour=params.get("starting_hour", 0),
+                repeat_every=params.get("repeat_every", 1),
+                timezone=tz,
             )
-            trigger_details.update({
-                'starting_hour': starting_hour,
-                'minute_of_hour': minute_of_hour,
-                'repeat_every': repeat_every
-            })
-            trigger_added = True
-            
-        elif trigger_type == 'daily':
-            hour = params.get('hour', 2)
-            minute = params.get('minute', 0)
-            year = params.get('year')
-            month = params.get('month')
-            day = params.get('day')
-            repeat_every = params.get('repeat_every', 1)
-            timezone = params.get('timezone', 'SERVER')
-            
+        elif trigger_type == "daily":
             settings.add_daily_trigger(
-                hour=hour,
-                minute=minute,
-                year=year,
-                month=month,
-                day=day,
-                repeat_every=repeat_every,
-                timezone=timezone
+                hour=params.get("hour", 2),
+                minute=params.get("minute", 0),
+                days=params.get("days"),
+                repeat_every=params.get("repeat_every", 1),
+                timezone=tz,
             )
-            trigger_details.update({
-                'hour': hour,
-                'minute': minute,
-                'year': year,
-                'month': month,
-                'day': day,
-                'repeat_every': repeat_every,
-                'timezone': timezone
-            })
-            trigger_added = True
-            
-        elif trigger_type == 'monthly':
-            day = params.get('day', 1)
-            hour = params.get('hour', 2)
-            minute = params.get('minute', 0)
-            year = params.get('year')
-            month = params.get('month')
-            
+        elif trigger_type == "monthly":
             settings.add_monthly_trigger(
-                day=day,
-                hour=hour,
-                minute=minute,
-                year=year,
-                month=month
+                day=params.get("day", 1),
+                hour=params.get("hour", 2),
+                minute=params.get("minute", 0),
+                run_on=params.get("run_on", "ON_THE_DAY"),
+                repeat_every=params.get("repeat_every", 1),
+                timezone=tz,
             )
-            trigger_details.update({
-                'day': day,
-                'hour': hour,
-                'minute': minute,
-                'year': year,
-                'month': month
-            })
-            trigger_added = True
-            
-        elif trigger_type == 'dataset':
-            dataset_name = params.get('dataset_name')
-            dataset_project_key = params.get('project_key', project_key)
-            
-            settings.add_dataset_trigger(
-                dataset_name=dataset_name,
-                project_key=dataset_project_key
-            )
-            trigger_details.update({
-                'dataset_name': dataset_name,
-                'project_key': dataset_project_key
-            })
-            trigger_added = True
-        
-        if trigger_added:
-            settings.save()
-            
-            return {
-                "status": "ok",
-                "scenario_id": scenario_id,
-                "trigger_details": trigger_details,
-                "message": f"Trigger '{trigger_type}' added to scenario '{scenario_id}' successfully"
-            }
-        
+        else:
+            trigger = dict(params["trigger"])
+            trigger.pop("id", None)  # DSS assigns a new id
+            settings.raw_triggers.append(trigger)
+
+        settings.save()
+        index = len(settings.raw_triggers) - 1
+
+        return ok(
+            scenario_id=scenario_id,
+            trigger=trigger_summary(settings.raw_triggers[index], index),
+            message=(
+                f"Trigger '{trigger_type}' added to scenario '{scenario_id}'"
+            ),
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to add trigger to scenario '{scenario_id}': {str(e)}"
-        }
+        return error(f"Failed to add trigger to scenario '{scenario_id}': {e}")
 
 
 def remove_scenario_trigger(
-    project_key: str,
-    scenario_id: str,
-    trigger_idx: int
-) -> Dict[str, Any]:
+    project_key: str, scenario_id: str, trigger_idx: int
+) -> dict[str, Any]:
     """
     Remove a trigger from a scenario by index.
-    
+
     Args:
         project_key: The project key containing the scenario
         scenario_id: ID of the scenario to remove trigger from
-        trigger_idx: Index of the trigger to remove (0-based)
-    
+        trigger_idx: Index of the trigger to remove (0-based, see
+            get_scenario_info)
+
     Returns:
         Dict with status and removal details or error message
     """
     try:
-        project = get_project(project_key)
-        scenario = project.get_scenario(scenario_id)
-        settings = scenario.get_settings()
-        
-        # Get current triggers
-        triggers = settings.get_triggers()
-        
-        if trigger_idx < 0 or trigger_idx >= len(triggers):
-            return {
-                "status": "error",
-                "message": f"Invalid trigger index {trigger_idx}. Valid range: 0-{len(triggers)-1}"
-            }
-        
-        # Get trigger info before removal
-        trigger_info = triggers[trigger_idx]
-        
-        # Remove the trigger
-        del triggers[trigger_idx]
-        
-        # Save the settings
+        settings = get_project(project_key).get_scenario(scenario_id).get_settings()
+        triggers = settings.raw_triggers
+
+        if not 0 <= trigger_idx < len(triggers):
+            return error(
+                f"Invalid trigger index {trigger_idx}. "
+                f"Scenario has {len(triggers)} trigger(s)",
+                "invalid_argument",
+            )
+
+        removed = triggers.pop(trigger_idx)
         settings.save()
-        
-        return {
-            "status": "ok",
-            "scenario_id": scenario_id,
-            "removed_trigger": {
-                "index": trigger_idx,
-                "type": trigger_info.get('type', 'unknown'),
-                "name": trigger_info.get('name', 'unnamed')
-            },
-            "remaining_triggers": len(triggers) - 1,
-            "message": f"Trigger at index {trigger_idx} removed from scenario '{scenario_id}' successfully"
-        }
-        
+
+        return ok(
+            scenario_id=scenario_id,
+            removed_trigger=trigger_summary(removed, trigger_idx),
+            remaining_triggers=len(triggers),
+            message=(
+                f"Trigger {trigger_idx} removed from scenario '{scenario_id}'"
+            ),
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to remove trigger from scenario '{scenario_id}': {str(e)}"
-        }
+        return error(
+            f"Failed to remove trigger from scenario '{scenario_id}': {e}"
+        )
 
 
 def run_scenario(
-    project_key: str,
-    scenario_id: str,
-    wait: bool = True,
-    no_fail: bool = False
-) -> Dict[str, Any]:
+    project_key: str, scenario_id: str, wait: bool = True
+) -> dict[str, Any]:
     """
     Run a scenario and optionally wait for completion.
-    
+
     Args:
         project_key: The project key containing the scenario
         scenario_id: ID of the scenario to run
-        wait: Whether to wait for completion (default: True)
-        no_fail: Whether to suppress failures (default: False)
-    
+        wait: Wait for the run to finish (False returns once it is requested)
+
     Returns:
-        Dict with status and run details or error message
+        Dict with the run outcome. "status" is "error" if the run did not
+        end with outcome SUCCESS (or WARNING).
     """
     try:
-        project = get_project(project_key)
-        scenario = project.get_scenario(scenario_id)
-        
-        if wait:
-            # Run scenario and wait for completion
-            run_result = scenario.run_and_wait(no_fail=no_fail)
-            
-            # Extract run information
-            run_info = {
-                "scenario_id": scenario_id,
-                "run_id": getattr(run_result, 'id', 'unknown'),
-                "outcome": getattr(run_result, 'outcome', 'unknown'),
-                "start_time": getattr(run_result, 'start_time', None),
-                "end_time": getattr(run_result, 'end_time', None),
-                "duration": getattr(run_result, 'duration', None),
-                "waited_for_completion": True
-            }
-            
-            # Check if run was successful
-            outcome = run_info.get('outcome', '').upper()
-            if outcome == 'SUCCESS':
-                status = "ok"
-                message = f"Scenario '{scenario_id}' ran successfully"
-            elif outcome == 'FAILED':
-                status = "error" if not no_fail else "ok"
-                message = f"Scenario '{scenario_id}' run failed"
-            else:
-                status = "ok"
-                message = f"Scenario '{scenario_id}' run completed with outcome: {outcome}"
-            
-            return {
-                "status": status,
-                "run_info": run_info,
-                "message": message
-            }
-            
-        else:
-            # Run scenario without waiting
-            trigger_fire = scenario.run()
-            
-            return {
-                "status": "ok",
-                "scenario_id": scenario_id,
-                "trigger_fire_id": getattr(trigger_fire, 'id', 'unknown'),
-                "waited_for_completion": False,
-                "message": f"Scenario '{scenario_id}' run initiated successfully"
-            }
-        
+        scenario = get_project(project_key).get_scenario(scenario_id)
+
+        if not wait:
+            fire = scenario.run()
+            return ok(
+                scenario_id=scenario_id,
+                trigger_run_id=fire.run_id,
+                message=(
+                    f"Run of scenario '{scenario_id}' requested; follow it "
+                    "with get_scenario_run_history"
+                ),
+            )
+
+        run = scenario.run_and_wait(no_fail=True)
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to run scenario '{scenario_id}': {str(e)}"
-        }
+        return error(f"Failed to run scenario '{scenario_id}': {e}")
+
+    if run is None:
+        return error(
+            f"Run of scenario '{scenario_id}' was cancelled before starting",
+            "job_failed",
+        )
+
+    run_info = scenario_run_summary(run)
+    if run_info["outcome"] not in ("SUCCESS", "WARNING"):
+        return error(
+            f"Scenario '{scenario_id}' ended with outcome "
+            f"{run_info['outcome']}; see get_scenario_logs",
+            "job_failed",
+            run_info=run_info,
+        )
+
+    return ok(
+        run_info=run_info,
+        message=f"Scenario '{scenario_id}' ran with outcome {run_info['outcome']}",
+    )
 
 
-def get_scenario_info(
-    project_key: str,
-    scenario_id: str
-) -> Dict[str, Any]:
+def get_scenario_info(project_key: str, scenario_id: str) -> dict[str, Any]:
     """
-    Get detailed information about a scenario.
-    
+    Get detailed information about a scenario (settings, triggers, status).
+
     Args:
         project_key: The project key containing the scenario
         scenario_id: ID of the scenario to inspect
-    
+
     Returns:
         Dict with scenario information or error message
     """
     try:
-        project = get_project(project_key)
-        scenario = project.get_scenario(scenario_id)
-        
-        # Get scenario metadata
-        metadata = scenario.get_metadata()
-        
-        # Get scenario settings
+        scenario = get_project(project_key).get_scenario(scenario_id)
         settings = scenario.get_settings()
-        
-        # Get triggers
-        triggers = settings.get_triggers()
-        
-        # Get scenario status
+        raw = settings.get_raw()
         status = scenario.get_status()
-        
-        return {
-            "status": "ok",
-            "scenario_info": {
+
+        last_runs = scenario.get_last_runs(limit=1, only_finished_runs=True)
+
+        return ok(
+            scenario_info={
                 "id": scenario_id,
-                "name": getattr(settings, 'name', scenario_id),
-                "type": getattr(settings, 'type', 'unknown'),
-                "active": getattr(settings, 'active', False),
-                "description": metadata.get("description", ""),
-                "tags": metadata.get("tags", []),
-                "custom_fields": metadata.get("customFields", {}),
+                "name": raw.get("name"),
+                "type": raw.get("type"),
+                "active": settings.active,
+                "description": raw.get("description", ""),
+                "tags": raw.get("tags", []),
+                "run_as": settings.effective_run_as,
+                "step_count": len((raw.get("params") or {}).get("steps", [])),
                 "triggers": [
-                    {
-                        "type": trigger.get('type', 'unknown'),
-                        "name": trigger.get('name', 'unnamed'),
-                        "active": trigger.get('active', False)
-                    }
-                    for trigger in triggers
+                    trigger_summary(t, i)
+                    for i, t in enumerate(settings.raw_triggers)
                 ],
-                "trigger_count": len(triggers),
-                "last_run": {
-                    "outcome": status.get('lastRunOutcome'),
-                    "start_time": status.get('lastRunStartTime'),
-                    "end_time": status.get('lastRunEndTime'),
-                    "duration": status.get('lastRunDuration')
-                },
-                "next_run": scenario.next_run() if hasattr(scenario, 'next_run') else None,
-                "is_active": scenario.is_active() if hasattr(scenario, 'is_active') else None
+                "reporters": [
+                    {
+                        "name": r.get("name"),
+                        "type": (r.get("messaging") or {}).get("type"),
+                        "active": r.get("active", False),
+                    }
+                    for r in settings.raw_reporters
+                ],
+                "running": status.running,
+                "next_run": iso(status.next_run),
+                "last_run": (
+                    scenario_run_summary(last_runs[0]) if last_runs else None
+                ),
             }
-        }
-        
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to get scenario info for '{scenario_id}': {str(e)}"
-        }
+        return error(f"Failed to get scenario info for '{scenario_id}': {e}")
 
 
 def list_scenarios(
     project_key: str,
     scenario_type: Optional[str] = None,
-    active_only: bool = False
-) -> Dict[str, Any]:
+    active_only: bool = False,
+) -> dict[str, Any]:
     """
     List all scenarios in a project, optionally filtered by type or active status.
-    
+
     Args:
         project_key: The project key to list scenarios from
-        scenario_type: Optional filter by scenario type ('step_based' or 'custom_python')
+        scenario_type: Optional filter ('step_based' or 'custom_python')
         active_only: Whether to list only active scenarios (default: False)
-    
+
     Returns:
         Dict with list of scenarios or error message
     """
     try:
         project = get_project(project_key)
-        
-        # Get all scenarios
-        all_scenarios = project.list_scenarios()
-        
-        scenarios_info = []
-        for scenario_data in all_scenarios:
-            scenario_id = scenario_data.get('id', scenario_data.get('name'))
-            
+        scenarios = []
+        warnings = []
+
+        for item in project.list_scenarios():
+            scenario_id = item.get("id")
             try:
-                scenario = project.get_scenario(scenario_id)
-                settings = scenario.get_settings()
-                
-                # Apply filters
-                if scenario_type and getattr(settings, 'type', None) != scenario_type:
-                    continue
-                
-                if active_only and not getattr(settings, 'active', False):
-                    continue
-                
-                scenarios_info.append({
-                    "id": scenario_id,
-                    "name": getattr(settings, 'name', scenario_id),
-                    "type": getattr(settings, 'type', 'unknown'),
-                    "active": getattr(settings, 'active', False),
-                    "description": scenario_data.get('description', ''),
-                    "tags": scenario_data.get('tags', []),
-                    "trigger_count": len(settings.get_triggers()) if hasattr(settings, 'get_triggers') else 0
-                })
-                
+                settings = project.get_scenario(scenario_id).get_settings()
             except Exception as e:
-                # Include basic info even if we can't get full details
-                scenarios_info.append({
+                warnings.append(f"{scenario_id}: {e}")
+                continue
+
+            raw = settings.get_raw()
+            if scenario_type and raw.get("type") != scenario_type:
+                continue
+            if active_only and not settings.active:
+                continue
+
+            scenarios.append(
+                {
                     "id": scenario_id,
-                    "name": scenario_data.get('name', scenario_id),
-                    "type": scenario_data.get('type', 'unknown'),
-                    "active": scenario_data.get('active', False),
-                    "description": scenario_data.get('description', ''),
-                    "tags": scenario_data.get('tags', []),
-                    "trigger_count": 0,
-                    "error": f"Could not get full details: {str(e)}"
-                })
-        
-        return {
-            "status": "ok",
-            "scenarios": scenarios_info,
-            "total_count": len(scenarios_info),
-            "project_key": project_key,
-            "filters": {
-                "scenario_type": scenario_type,
-                "active_only": active_only
-            }
-        }
-        
+                    "name": raw.get("name"),
+                    "type": raw.get("type"),
+                    "active": settings.active,
+                    "tags": raw.get("tags", []),
+                    "triggers": [
+                        trigger_summary(t, i)
+                        for i, t in enumerate(settings.raw_triggers)
+                    ],
+                }
+            )
+
+        result = ok(
+            scenarios=scenarios,
+            total_count=len(scenarios),
+            project_key=project_key,
+        )
+        if warnings:
+            result["warnings"] = warnings
+        return result
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to list scenarios in project '{project_key}': {str(e)}"
-        }
+        return error(
+            f"Failed to list scenarios in project '{project_key}': {e}"
+        )
 
 
 def get_scenario_run_history(
-    project_key: str,
-    scenario_id: str,
-    limit: int = 10
-) -> Dict[str, Any]:
+    project_key: str, scenario_id: str, limit: int = 10
+) -> dict[str, Any]:
     """
     Get the run history for a scenario.
-    
+
     Args:
         project_key: The project key containing the scenario
         scenario_id: ID of the scenario to get run history for
         limit: Maximum number of runs to return (default: 10)
-    
+
     Returns:
-        Dict with run history or error message
+        Dict with run history (most recent first) or error message
     """
     try:
-        project = get_project(project_key)
-        scenario = project.get_scenario(scenario_id)
-        
-        # Get scenario run history
-        if hasattr(scenario, 'get_run_history'):
-            run_history = scenario.get_run_history(limit=limit)
-        else:
-            # Fallback to get_last_runs if get_run_history is not available
-            run_history = scenario.get_last_runs(limit=limit) if hasattr(scenario, 'get_last_runs') else []
-        
-        # Process run history
-        processed_runs = []
-        for run in run_history:
-            run_info = {
-                "run_id": getattr(run, 'id', 'unknown'),
-                "outcome": getattr(run, 'outcome', 'unknown'),
-                "start_time": getattr(run, 'start_time', None),
-                "end_time": getattr(run, 'end_time', None),
-                "duration": getattr(run, 'duration', None),
-                "trigger_name": getattr(run, 'trigger_name', 'unknown'),
-                "trigger_type": getattr(run, 'trigger_type', 'unknown')
-            }
-            
-            # Handle different run object formats
-            if hasattr(run, 'get_info'):
-                run_details = run.get_info()
-                run_info.update({
-                    "outcome": run_details.get('outcome', run_info['outcome']),
-                    "start_time": run_details.get('startTime', run_info['start_time']),
-                    "end_time": run_details.get('endTime', run_info['end_time']),
-                    "duration": run_details.get('duration', run_info['duration'])
-                })
-            
-            processed_runs.append(run_info)
-        
-        return {
-            "status": "ok",
-            "scenario_id": scenario_id,
-            "run_history": processed_runs,
-            "total_runs": len(processed_runs),
-            "message": f"Retrieved {len(processed_runs)} runs for scenario '{scenario_id}'"
-        }
-        
+        scenario = get_project(project_key).get_scenario(scenario_id)
+        runs = [scenario_run_summary(r) for r in scenario.get_last_runs(limit=limit)]
+
+        return ok(
+            scenario_id=scenario_id,
+            run_history=runs,
+            total_runs=len(runs),
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to get run history for scenario '{scenario_id}': {str(e)}"
-        }
+        return error(
+            f"Failed to get run history for scenario '{scenario_id}': {e}"
+        )

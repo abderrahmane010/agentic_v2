@@ -10,7 +10,6 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "dataiku-api-client==14.0.0",
-    "langchain>=1.4.3",
     "mcp>=1.2,<2",
     "pyyaml",
     "pydantic>=2.0.0",
@@ -20,7 +19,6 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
-    "black",
     "ruff",
 ]
 
@@ -30,16 +28,15 @@ include = ["dataiku_mcp*", "scripts*"]
 [project.scripts]
 dataiku-mcp-server = "scripts.mcp_server:main"
 
-[tool.black]
-line-length = 80
-target-version = ['py311']
-
 [tool.ruff]
-line-length = 80
+line-length = 88
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I", "B", "C4", "UP"]
+# Erreurs réelles uniquement : pyflakes (F), erreurs de syntaxe (E9),
+# bugs probables (B). Le style sera durci progressivement.
+select = ["E9", "F", "B"]
+ignore = ["B904"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

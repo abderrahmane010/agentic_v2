@@ -1,17 +1,17 @@
 """
 MCP Server for Dataiku DSS integration.
- 
+
 Ne pas ajouter `from __future__ import annotations` dans ce fichier :
 FastMCP doit pouvoir lire les annotations réelles des outils décorés.
 """
- 
+
 import json
 import logging
 import sys
 from typing import Any, Dict, List, Optional
- 
+
 from mcp.server.fastmcp import FastMCP
- 
+
 from dataiku_mcp.client import get_project, list_projects
 from dataiku_mcp.securite import (
     filtrer_projets,
@@ -32,7 +32,7 @@ from dataiku_mcp.tools import (
     recipes,
     scenarios,
 )
- 
+
 # Logs sur stderr : stdout est réservé au protocole MCP (transport stdio).
 logging.basicConfig(
     level=logging.INFO,
@@ -40,7 +40,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
- 
+
 mcp = FastMCP(
     "Dataiku DSS MCP Server",
     instructions=(
@@ -50,6 +50,50 @@ mcp = FastMCP(
         "lecture seule (DSS_READ_ONLY=true)."
     ),
 )
+
+
+# ===========================================================================
+# Project tools
+# ===========================================================================
+@mcp.tool()
+def list_dss_projects() -> Dict[str, Any]:
+    """List the keys of the Dataiku projects this server may access."""
+    try:
+        projects = filtrer_projets(list_projects())
+        return {"status": "ok", "projects": projects, "count": len(projects)}
+    except Exception as exc:
+        return {"status": "error", "error_type": "dss_error", "message": str(exc)}
+
+
+# ===========================================================================
+# Recipe tools
+# ===========================================================================
+@mcp.tool()
+@outil_securise()
+def list_recipes(
+    project_key: str, recipe_type: Optional[str] = None
+) -> Dict[str, Any]:
+    """List the recipes of a project with their inputs and outputs.
+
+    Args:
+        project_key: The project key
+        recipe_type: Optional filter (e.g. 'python', 'join', 'sql_query')
+    """
+    return recipes.list_recipes(project_key, recipe_type)
+
+
+@mcp.tool()
+@outil_securise()
+def get_recipe_info(project_key: str, recipe_name: str) -> Dict[str, Any]:
+    """Get the type, inputs, outputs, engine and metadata of a recipe.
+
+    Args:
+        project_key: The project key
+        recipe_name: Name of the recipe
+    """
+    return recipes.get_recipe_info(project_key, recipe_name)
+
+
 @mcp.tool()
 @outil_securise(ecriture=True)
 def create_recipe(
@@ -61,10 +105,11 @@ def create_recipe(
     code: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create a new recipe in a Dataiku project.
- 
+
     Args:
         project_key: The project key
-        recipe_type: Type of recipe (e.g. 'python', 'sql', 'join')
+        recipe_type: DSS recipe type (e.g. 'python', 'sql_script',
+            'sql_query', 'pyspark', 'join', 'grouping', 'sync')
         recipe_name: Name for the new recipe
         inputs: List of input dataset names
         outputs: List of output dataset configurations
@@ -73,7 +118,7 @@ def create_recipe(
     return recipes.create_recipe(
         project_key, recipe_type, recipe_name, inputs, outputs, code
     )
- 
+
  
 @mcp.tool()
 @outil_securise(ecriture=True)
@@ -83,26 +128,27 @@ def update_recipe(
     settings: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Update an existing recipe.
- 
+
     Args:
         project_key: The project key
         recipe_name: Name of the recipe to update
-        settings: Recipe settings to update, e.g. {"code": "..."}
+        settings: Fields to update: code, description, tags,
+            custom_fields, params (merged into the recipe params)
     """
     return recipes.update_recipe(project_key, recipe_name, **settings)
- 
+
  
 @mcp.tool()
 @outil_securise(ecriture=True)
 def delete_recipe(project_key: str, recipe_name: str) -> Dict[str, Any]:
     """Delete a recipe from a project.
- 
+
     Args:
         project_key: The project key
         recipe_name: Name of the recipe to delete
     """
     return recipes.delete_recipe(project_key, recipe_name)
- 
+
  
 @mcp.tool()
 @outil_securise(ecriture=True)
@@ -110,18 +156,48 @@ def run_recipe(
     project_key: str,
     recipe_name: str,
     build_mode: Optional[str] = None,
+    wait: bool = True,
 ) -> Dict[str, Any]:
     """Run a recipe to build its outputs.
- 
+
     Args:
         project_key: The project key
         recipe_name: Name of the recipe to run
-        build_mode: Optional build mode
+        build_mode: RECURSIVE_BUILD, NON_RECURSIVE_FORCED_BUILD (default) or
+            RECURSIVE_FORCED_BUILD
+        wait: Wait for the job to finish; False returns the job id at once
+            (follow it with get_job_details)
     """
-    return recipes.run_recipe(project_key, recipe_name, build_mode)
+    return recipes.run_recipe(project_key, recipe_name, build_mode, wait)
 # ===========================================================================
 # Dataset tools
 # ===========================================================================
+@mcp.tool()
+@outil_securise()
+def list_datasets(
+    project_key: str, dataset_type: Optional[str] = None
+) -> Dict[str, Any]:
+    """List the datasets of a project (type, connection, partitioning).
+
+    Args:
+        project_key: The project key
+        dataset_type: Optional filter on the DSS type (e.g. 'PostgreSQL')
+    """
+    return datasets.list_datasets(project_key, dataset_type)
+
+
+@mcp.tool()
+@outil_securise()
+def get_dataset_info(project_key: str, dataset_name: str) -> Dict[str, Any]:
+    """Get the settings, location, partitioning and last build of a dataset.
+
+    Args:
+        project_key: The project key
+        dataset_name: Name of the dataset
+    """
+    return datasets.get_dataset_info(project_key, dataset_name)
+
+
 @mcp.tool()
 @outil_securise(ecriture=True)
 def create_dataset(
@@ -131,15 +207,17 @@ def create_dataset(
     params: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Create a new dataset in a project.
- 
+
     Args:
         project_key: The project key
         dataset_name: Name for the new dataset
-        dataset_type: Type of dataset (e.g. 'Filesystem', 'PostgreSQL')
-        params: Dataset configuration parameters
+        dataset_type: 'managed', 'filesystem', 'sql', 's3', 'uploaded' or a
+            raw DSS dataset type
+        params: Dataset parameters (connection, path, table, schema,
+            sql_type, format_type, store_into...)
     """
     return datasets.create_dataset(project_key, dataset_name, dataset_type, params)
- 
+
  
 @mcp.tool()
 @outil_securise(ecriture=True)
@@ -149,14 +227,14 @@ def update_dataset(
     settings: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Update dataset settings.
- 
+
     Args:
         project_key: The project key
         dataset_name: Name of the dataset to update
         settings: Dataset settings to update
     """
     return datasets.update_dataset(project_key, dataset_name, **settings)
- 
+
  
 @mcp.tool()
 @outil_securise(ecriture=True)
@@ -166,14 +244,14 @@ def delete_dataset(
     drop_data: bool = False,
 ) -> Dict[str, Any]:
     """Delete a dataset from a project.
- 
+
     Args:
         project_key: The project key
         dataset_name: Name of the dataset to delete
         drop_data: Whether to drop the underlying data
     """
     return datasets.delete_dataset(project_key, dataset_name, drop_data)
- 
+
  
 @mcp.tool()
 @outil_securise(ecriture=True)
@@ -182,45 +260,110 @@ def build_dataset(
     dataset_name: str,
     mode: Optional[str] = None,
     partition: Optional[str] = None,
+    wait: bool = True,
 ) -> Dict[str, Any]:
     """Build a dataset.
- 
+
     Args:
         project_key: The project key
         dataset_name: Name of the dataset to build
-        mode: Optional build mode
+        mode: RECURSIVE_BUILD, NON_RECURSIVE_FORCED_BUILD (default) or
+            RECURSIVE_FORCED_BUILD
         partition: Optional partition specification
+        wait: Wait for the job to finish; False returns the job id at once
+            (follow it with get_job_details)
     """
-    return datasets.build_dataset(project_key, dataset_name, mode, partition)
- 
+    return datasets.build_dataset(project_key, dataset_name, mode, partition, wait)
+
+
+@mcp.tool()
+@outil_securise(ecriture=True)
+def clear_dataset(
+    project_key: str,
+    dataset_name: str,
+    partition: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Delete the data of a dataset (or of some partitions); keeps the dataset.
+
+    Args:
+        project_key: The project key
+        dataset_name: Name of the dataset to clear
+        partition: Optional partitions to clear
+    """
+    return datasets.clear_dataset(project_key, dataset_name, partition)
+
  
 @mcp.tool()
 @outil_securise()
 def inspect_dataset_schema(project_key: str, dataset_name: str) -> Dict[str, Any]:
     """Get dataset schema information.
- 
+
     Args:
         project_key: The project key
         dataset_name: Name of the dataset
     """
     return datasets.inspect_dataset_schema(project_key, dataset_name)
- 
+
  
 @mcp.tool()
 @outil_securise()
 def check_dataset_metrics(project_key: str, dataset_name: str) -> Dict[str, Any]:
     """Get latest dataset metrics.
- 
+
     Args:
         project_key: The project key
         dataset_name: Name of the dataset
     """
     return datasets.check_dataset_metrics(project_key, dataset_name)
- 
+
  
 # ===========================================================================
 # Scenario tools
 # ===========================================================================
+@mcp.tool()
+@outil_securise()
+def list_scenarios(
+    project_key: str,
+    scenario_type: Optional[str] = None,
+    active_only: bool = False,
+) -> Dict[str, Any]:
+    """List the scenarios of a project with their triggers.
+
+    Args:
+        project_key: The project key
+        scenario_type: Optional filter ('step_based' or 'custom_python')
+        active_only: Only scenarios whose auto-triggers are active
+    """
+    return scenarios.list_scenarios(project_key, scenario_type, active_only)
+
+
+@mcp.tool()
+@outil_securise()
+def get_scenario_info(project_key: str, scenario_id: str) -> Dict[str, Any]:
+    """Get the settings, triggers, reporters, next run and last run of a scenario.
+
+    Args:
+        project_key: The project key
+        scenario_id: ID of the scenario
+    """
+    return scenarios.get_scenario_info(project_key, scenario_id)
+
+
+@mcp.tool()
+@outil_securise()
+def get_scenario_run_history(
+    project_key: str, scenario_id: str, limit: int = 10
+) -> Dict[str, Any]:
+    """Get the last runs of a scenario (outcome, dates, duration, trigger).
+
+    Args:
+        project_key: The project key
+        scenario_id: ID of the scenario
+        limit: Number of runs to return
+    """
+    return scenarios.get_scenario_run_history(project_key, scenario_id, limit)
+
+
 @mcp.tool()
 @outil_securise(ecriture=True)
 def create_scenario(
@@ -230,7 +373,7 @@ def create_scenario(
     definition: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Create a new scenario in a project.
- 
+
     Args:
         project_key: The project key
         scenario_name: Name for the new scenario
@@ -240,7 +383,7 @@ def create_scenario(
     return scenarios.create_scenario(
         project_key, scenario_name, scenario_type, definition
     )
- 
+
  
 @mcp.tool()
 @outil_securise(ecriture=True)
@@ -250,26 +393,27 @@ def update_scenario(
     settings: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Update scenario settings.
- 
+
     Args:
         project_key: The project key
         scenario_id: ID of the scenario to update
-        settings: Scenario settings to update
+        settings: Fields to update: name, description, active, tags,
+            params, script (custom_python), step_script + step_index
     """
     return scenarios.update_scenario(project_key, scenario_id, **settings)
- 
+
  
 @mcp.tool()
 @outil_securise(ecriture=True)
 def delete_scenario(project_key: str, scenario_id: str) -> Dict[str, Any]:
     """Delete a scenario from a project.
- 
+
     Args:
         project_key: The project key
         scenario_id: ID of the scenario to delete
     """
     return scenarios.delete_scenario(project_key, scenario_id)
- 
+
  
 @mcp.tool()
 @outil_securise(ecriture=True)
@@ -280,17 +424,19 @@ def add_scenario_trigger(
     params: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Add a trigger to a scenario.
- 
+
     Args:
         project_key: The project key
         scenario_id: ID of the scenario
-        trigger_type: Type of trigger to add
-        params: Trigger parameters
+        trigger_type: 'periodic', 'hourly', 'daily', 'monthly' or 'raw'
+        params: Trigger parameters (e.g. {"hour": 2, "minute": 0} for daily,
+            {"trigger": {...}} for raw: a trigger dict copied from
+            get_scenario_info, for dataset or SQL triggers)
     """
     return scenarios.add_scenario_trigger(
         project_key, scenario_id, trigger_type, **(params or {})
     )
- 
+
  
 @mcp.tool()
 @outil_securise(ecriture=True)
@@ -300,25 +446,28 @@ def remove_scenario_trigger(
     trigger_idx: int,
 ) -> Dict[str, Any]:
     """Remove a trigger from a scenario.
- 
+
     Args:
         project_key: The project key
         scenario_id: ID of the scenario
         trigger_idx: Index of the trigger to remove
     """
     return scenarios.remove_scenario_trigger(project_key, scenario_id, trigger_idx)
- 
+
  
 @mcp.tool()
 @outil_securise(ecriture=True)
-def run_scenario(project_key: str, scenario_id: str) -> Dict[str, Any]:
+def run_scenario(
+    project_key: str, scenario_id: str, wait: bool = True
+) -> Dict[str, Any]:
     """Run a scenario manually.
- 
+
     Args:
         project_key: The project key
         scenario_id: ID of the scenario to run
+        wait: Wait for the run to finish; False returns once requested
     """
-    return scenarios.run_scenario(project_key, scenario_id)
+    return scenarios.run_scenario(project_key, scenario_id, wait)
 #----------scenario avancé---------------
 @mcp.tool()
 @outil_securise()
@@ -326,28 +475,32 @@ def get_scenario_logs(
     project_key: str,
     scenario_id: str,
     run_id: Optional[str] = None,
+    max_chars: int = 20000,
 ) -> Dict[str, Any]:
-    """Get detailed run logs and error messages for failed scenarios.
- 
+    """Get the step outcomes, first error and logs of a scenario run.
+
     Args:
         project_key: The project key
         scenario_id: ID of the scenario
         run_id: Specific run ID (defaults to latest)
+        max_chars: Maximum size of each log (the end is kept)
     """
-    return advanced_scenarios.get_scenario_logs(project_key, scenario_id, run_id)
- 
+    return advanced_scenarios.get_scenario_logs(
+        project_key, scenario_id, run_id, max_chars
+    )
+
  
 @mcp.tool()
 @outil_securise()
 def get_scenario_steps(project_key: str, scenario_id: str) -> Dict[str, Any]:
     """Get detailed step configuration including Python code.
- 
+
     Args:
         project_key: The project key
         scenario_id: ID of the scenario
     """
     return advanced_scenarios.get_scenario_steps(project_key, scenario_id)
- 
+
  
 @mcp.tool()
 @outil_securise(ecriture=True)
@@ -357,8 +510,9 @@ def clone_scenario(
     new_scenario_name: str,
     modifications: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Clone an existing scenario with modifications.
- 
+    """Clone an existing scenario. The clone is INACTIVE unless
+    modifications contains "active": true.
+
     Args:
         project_key: The project key
         source_scenario_id: Source scenario ID to clone
@@ -368,7 +522,7 @@ def clone_scenario(
     return advanced_scenarios.clone_scenario(
         project_key, source_scenario_id, new_scenario_name, modifications
     )
- 
+
  
 # ===========================================================================
 # Code development tools
@@ -377,13 +531,13 @@ def clone_scenario(
 @outil_securise()
 def get_recipe_code(project_key: str, recipe_name: str) -> Dict[str, Any]:
     """Extract actual Python/SQL code from recipes.
- 
+
     Args:
         project_key: The project key
         recipe_name: Name of the recipe
     """
     return code_development.get_recipe_code(project_key, recipe_name)
- 
+
  
 @mcp.tool()
 @outil_securise()
@@ -393,14 +547,14 @@ def validate_recipe_syntax(
     code: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Validate Python/SQL syntax before execution.
- 
+
     Args:
         project_key: The project key
         recipe_name: Name of the recipe
         code: Optional code to validate
     """
     return code_development.validate_recipe_syntax(project_key, recipe_name, code)
- 
+
  
 @mcp.tool()
 @outil_securise()
@@ -410,14 +564,14 @@ def dry_run_recipe(
     sample_rows: int = 100,
 ) -> Dict[str, Any]:
     """Test recipe logic without actual execution.
- 
+
     Args:
         project_key: The project key
         recipe_name: Name of the recipe
         sample_rows: Number of sample rows to test with
     """
     return code_development.test_recipe_dry_run(project_key, recipe_name, sample_rows)
- 
+
  
 @mcp.tool()
 @outil_securise()
@@ -427,17 +581,17 @@ def get_generated_sql(
     partition: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Extract generated SQL from visual recipes (Shaker, Join, SQL-based...).
- 
+
     For Shaker recipes, returns the recipe configuration since SQL is
     generated dynamically at runtime.
- 
+
     Args:
         project_key: The project key
         recipe_name: Name of the recipe
         partition: Optional partition specification
     """
     return code_development.get_generated_sql(project_key, recipe_name, partition)
- 
+
  
 # ===========================================================================
 # Project exploration tools
@@ -446,28 +600,31 @@ def get_generated_sql(
 @outil_securise()
 def get_project_flow(project_key: str) -> Dict[str, Any]:
     """Get complete data flow/pipeline structure.
- 
+
     Args:
         project_key: The project key
     """
     return project_exploration.get_project_flow(project_key)
- 
+
  
 @mcp.tool()
 @outil_securise()
 def classer_datasets_flow(project_key: str) -> Dict[str, Any]:
     """Classify the project's datasets by their position in the Flow:
     sources, intermediates, finals and isolated datasets.
- 
+
     Classification is topological (based on recipe dependencies),
     not necessarily business meaning. Managed folders, models and datasets
     shared from other projects are reported separately.
- 
+
     Args:
         project_key: The project key
     """
-    return flow_classification.classer_datasets_flow(project_key)
- 
+    try:
+        return {"status": "ok", **flow_classification.classer_datasets_flow(project_key)}
+    except Exception as exc:
+        return {"status": "error", "error_type": "dss_error", "message": str(exc)}
+
  
 @mcp.tool()
 @outil_securise()
@@ -477,7 +634,7 @@ def search_project_objects(
     object_types: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Search for datasets, recipes, scenarios by name/pattern.
- 
+
     Args:
         project_key: The project key
         search_term: Search pattern
@@ -486,7 +643,7 @@ def search_project_objects(
     return project_exploration.search_project_objects(
         project_key, search_term, object_types
     )
- 
+
  
 @mcp.tool()
 @outil_securise()
@@ -496,18 +653,20 @@ def get_dataset_sample(
     rows: int = 100,
     columns: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Get sample data from datasets.
- 
+    """Get the first rows of a dataset with per-column statistics.
+
+    Warning: returns real data to the client (possible personal data).
+
     Args:
         project_key: The project key
         dataset_name: Name of the dataset
-        rows: Number of sample rows
+        rows: Number of sample rows (max 1000)
         columns: Specific columns to include
     """
     return project_exploration.get_dataset_sample(
         project_key, dataset_name, rows, columns
     )
- 
+
  
 # ===========================================================================
 # Environment configuration tools
@@ -516,34 +675,34 @@ def get_dataset_sample(
 @outil_securise()
 def get_code_environments(project_key: Optional[str] = None) -> Dict[str, Any]:
     """List available Python/R environments.
- 
+
     Args:
         project_key: Project identifier (optional)
     """
     return environment_config.get_code_environments(project_key)
- 
+
  
 @mcp.tool()
 @outil_securise()
 def get_project_variables(project_key: str) -> Dict[str, Any]:
     """Get project-level variables and configuration.
- 
+
     Args:
         project_key: The project key
     """
     return environment_config.get_project_variables(project_key)
- 
+
  
 @mcp.tool()
 @outil_securise()
 def get_connections(project_key: Optional[str] = None) -> Dict[str, Any]:
     """List available data connections.
- 
+
     Args:
         project_key: Project identifier (optional)
     """
     return environment_config.get_connections(project_key)
- 
+
  
 # ===========================================================================
 # Monitoring and debug tools
@@ -556,38 +715,41 @@ def get_recent_runs(
     status_filter: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Get recent run history across all scenarios/recipes.
- 
+
     Args:
         project_key: The project key
         limit: Number of recent runs to retrieve
         status_filter: Filter by status
     """
     return monitoring_debug.get_recent_runs(project_key, limit, status_filter)
- 
+
  
 @mcp.tool()
 @outil_securise()
-def get_job_details(project_key: str, job_id: str) -> Dict[str, Any]:
-    """Get detailed job execution information.
- 
+def get_job_details(
+    project_key: str, job_id: str, max_log_chars: int = 20000
+) -> Dict[str, Any]:
+    """Get the state, activities and log of a job.
+
     Args:
         project_key: The project key
         job_id: Job identifier
+        max_log_chars: Maximum log size (the end is kept)
     """
-    return monitoring_debug.get_job_details(project_key, job_id)
- 
+    return monitoring_debug.get_job_details(project_key, job_id, max_log_chars)
+
  
 @mcp.tool()
 @outil_securise(ecriture=True)
 def cancel_running_jobs(project_key: str, job_ids: List[str]) -> Dict[str, Any]:
     """Cancel running jobs/scenarios.
- 
+
     Args:
         project_key: The project key
         job_ids: List of job IDs to cancel
     """
     return monitoring_debug.cancel_running_jobs(project_key, job_ids)
- 
+
  
 # ===========================================================================
 # Productivity tools
@@ -601,18 +763,29 @@ def duplicate_project_structure(
     source_project_key: str,
     target_project_key: str,
     include_data: bool = False,
+    target_project_name: Optional[str] = None,
+    connection_remapping: Optional[Dict[str, str]] = None,
+    dry_run: bool = True,
 ) -> Dict[str, Any]:
-    """Copy project structure to new project.
- 
+    """Duplicate a project with the native DSS duplication.
+
     Args:
         source_project_key: Source project identifier
-        target_project_key: Target project identifier
-        include_data: Whether to copy data
+        target_project_key: Key of the new project (must not exist)
+        include_data: Whether to copy the data of managed datasets
+        target_project_name: Name of the new project (defaults to its key)
+        connection_remapping: {source connection: target connection}
+        dry_run: Only describe what would be duplicated (default True)
     """
     return productivity.duplicate_project_structure(
-        source_project_key, target_project_key, include_data
+        source_project_key,
+        target_project_key,
+        include_data,
+        target_project_name,
+        connection_remapping,
+        dry_run,
     )
- 
+
  
 @mcp.tool()
 @outil_securise()
@@ -621,13 +794,13 @@ def export_project_config(
     export_format: str = "json",
 ) -> Dict[str, Any]:
     """Export project configuration as JSON/YAML.
- 
+
     Args:
         project_key: The project key
         export_format: Export format ('json' or 'yaml')
     """
     return productivity.export_project_config(project_key, export_format)
- 
+
  
 @mcp.tool()
 @outil_securise(ecriture=True)
@@ -636,17 +809,22 @@ def batch_update_objects(
     object_type: str,
     pattern: str,
     updates: Dict[str, Any],
+    dry_run: bool = True,
 ) -> Dict[str, Any]:
-    """Update multiple objects with similar changes.
- 
+    """Apply the same update to every object whose name matches a pattern.
+
     Args:
         project_key: The project key
-        object_type: Type of objects to update
-        pattern: Pattern to match objects
-        updates: Updates to apply
+        object_type: 'datasets', 'recipes' or 'scenarios'
+        pattern: Regular expression matched against the object name
+        updates: Fields accepted by update_dataset / update_recipe /
+            update_scenario
+        dry_run: Only list the matching objects (default True)
     """
-    return productivity.batch_update_objects(project_key, object_type, pattern, updates)
- 
+    return productivity.batch_update_objects(
+        project_key, object_type, pattern, updates, dry_run
+    )
+
  
 # ===========================================================================
 # Resources
@@ -658,7 +836,7 @@ def list_available_projects() -> str:
         {"projects": filtrer_projets(list_projects())},
         ensure_ascii=False,
     )
- 
+
  
 @mcp.resource("dss://project/{project_key}")
 def get_project_info(project_key: str) -> str:
@@ -678,7 +856,7 @@ def get_project_info(project_key: str) -> str:
     except Exception as exc:
         logger.warning("get_project_info(%s) : %s", project_key, exc)
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
- 
+
  
 def create_server() -> FastMCP:
     """Create and configure the MCP server."""
@@ -689,7 +867,7 @@ def create_server() -> FastMCP:
         ", ".join(sorted(autorises)) if autorises else "tous",
     )
     return mcp
- 
+
  
 if __name__ == "__main__":
     create_server().run()

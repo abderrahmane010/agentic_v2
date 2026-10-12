@@ -5,107 +5,122 @@ This module provides functions for creating, updating, deleting, and running rec
 in Dataiku DSS projects through the dataiku-api-client.
 """
 
-from typing import Dict, List, Optional, Union, Any
-import dataikuapi
-import dataikuapi.dss.project
-import dataikuapi.dss.recipe
-from dataiku_mcp.client import get_client, get_project
+from typing import Any, Optional, Union
+
+from dataiku_mcp.client import get_project
+from dataiku_mcp.tools._common import (
+    BUILD_MODES,
+    CODE_RECIPE_TYPES,
+    error,
+    flat_refs,
+    job_summary,
+    ok,
+    wait_for_job,
+)
 
 
 def create_recipe(
     project_key: str,
     recipe_type: str,
     recipe_name: str,
-    inputs: List[str],
-    outputs: List[Union[str, Dict[str, Any]]],
-    code: Optional[str] = None
-) -> Dict[str, Any]:
+    inputs: list[str],
+    outputs: list[Union[str, dict[str, Any]]],
+    code: Optional[str] = None,
+) -> dict[str, Any]:
     """
     Create a new recipe in a Dataiku DSS project.
-    
+
     Args:
         project_key: The project key where the recipe will be created
-        recipe_type: Type of recipe (e.g., 'python', 'r', 'sql', 'grouping', 'sync', etc.)
+        recipe_type: DSS recipe type (e.g. 'python', 'sql_script', 'sql_query',
+            'pyspark', 'grouping', 'join', 'sync', 'prepare')
         recipe_name: Name of the recipe to create
         inputs: List of input dataset names
         outputs: List of output specifications. Can be:
             - String: name of existing dataset
             - Dict: {"name": str, "new": bool, "connection": str, "append": bool}
-        code: Optional code content for code recipes (python, r, sql)
-    
+        code: Optional code content for code recipes
+
     Returns:
         Dict with status and recipe details or error message
     """
     try:
         project = get_project(project_key)
-        
-        # Create recipe builder
         builder = project.new_recipe(recipe_type, name=recipe_name)
-        
-        # Add inputs
+
         for input_name in inputs:
             builder = builder.with_input(input_name)
-        
-        # Add outputs
+
+        output_names = []
         for output_spec in outputs:
             if isinstance(output_spec, str):
-                # Simple string output - existing dataset
-                builder = builder.with_output(output_spec)
-            elif isinstance(output_spec, dict):
-                output_name = output_spec.get("name")
-                if not output_name:
-                    return {
-                        "status": "error",
-                        "message": "Output specification must include 'name' field"
-                    }
-                
-                if output_spec.get("new", False):
-                    # Create new dataset output
-                    connection = output_spec.get("connection", "filesystem_managed")
-                    builder = builder.with_new_output(output_name, connection)
+                output_spec = {"name": output_spec}
+            if not isinstance(output_spec, dict) or not output_spec.get("name"):
+                return error(
+                    f"Invalid output specification: {output_spec}",
+                    "invalid_argument",
+                )
+
+            name = output_spec["name"]
+            append = output_spec.get("append", False)
+            output_names.append(name)
+
+            if output_spec.get("new", False):
+                connection = output_spec.get("connection", "filesystem_managed")
+                # Code recipes and visual recipes use different builders.
+                if hasattr(builder, "with_new_output_dataset"):
+                    builder = builder.with_new_output_dataset(
+                        name, connection, append=append
+                    )
+                elif hasattr(builder, "with_new_output"):
+                    builder = builder.with_new_output(
+                        name, connection, append=append
+                    )
                 else:
-                    # Use existing dataset
-                    append = output_spec.get("append", False)
-                    builder = builder.with_output(output_name, append=append)
+                    return error(
+                        f"Recipe type '{recipe_type}' cannot create a new "
+                        "output dataset; create the dataset first",
+                        "invalid_argument",
+                    )
             else:
-                return {
-                    "status": "error",
-                    "message": f"Invalid output specification: {output_spec}"
-                }
-        
-        # Build the recipe
-        recipe = builder.build()
-        
-        # Set code if provided (for code recipes)
-        if code and recipe_type in ['python', 'r', 'sql', 'pyspark', 'sparkr', 'sparksql']:
+                builder = builder.with_output(name, append=append)
+
+        if code and hasattr(builder, "with_script"):
+            builder = builder.with_script(code)
+
+        recipe = builder.create()
+
+        # Recipes without a script builder (e.g. sql_query): set the payload.
+        if code and not hasattr(builder, "with_script"):
+            if recipe_type not in CODE_RECIPE_TYPES:
+                return error(
+                    f"Recipe '{recipe_name}' was created, but recipe type "
+                    f"'{recipe_type}' does not accept code",
+                    "invalid_argument",
+                    recipe_name=recipe_name,
+                )
             settings = recipe.get_settings()
-            settings.set_code(code)
+            settings.set_payload(code)
             settings.save()
-        
-        return {
-            "status": "ok",
-            "recipe_id": recipe.id,
-            "recipe_name": recipe_name,
-            "recipe_type": recipe_type,
-            "inputs": inputs,
-            "outputs": [out if isinstance(out, str) else out.get("name") for out in outputs]
-        }
-        
+
+        return ok(
+            recipe_name=recipe.name,
+            recipe_type=recipe_type,
+            inputs=inputs,
+            outputs=output_names,
+            message=f"Recipe '{recipe_name}' created successfully",
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to create recipe '{recipe_name}': {str(e)}"
-        }
+        return error(f"Failed to create recipe '{recipe_name}': {e}")
 
 
 def update_recipe(
-    project_key: str,
-    recipe_name: str,
-    **kwargs
-) -> Dict[str, Any]:
+    project_key: str, recipe_name: str, **kwargs: Any
+) -> dict[str, Any]:
     """
     Update an existing recipe's settings or code.
-    
+
     Args:
         project_key: The project key containing the recipe
         recipe_name: Name of the recipe to update
@@ -114,273 +129,232 @@ def update_recipe(
             - description: Recipe description
             - tags: List of tags
             - custom_fields: Dict of custom metadata fields
-    
+            - params: Dict merged into the recipe "params" (engine settings...)
+
     Returns:
         Dict with status and update details or error message
     """
+    supported = {"code", "description", "tags", "custom_fields", "params"}
+    unknown = sorted(set(kwargs) - supported)
+    if unknown:
+        return error(
+            f"Unsupported fields: {unknown}. Supported: {sorted(supported)}",
+            "invalid_argument",
+        )
+
     try:
-        project = get_project(project_key)
-        recipe = project.get_recipe(recipe_name)
-        
+        recipe = get_project(project_key).get_recipe(recipe_name)
+        settings = recipe.get_settings()
         updated_fields = []
-        
-        # Update code if provided
-        if 'code' in kwargs:
-            settings = recipe.get_settings()
-            settings.set_code(kwargs['code'])
-            settings.save()
-            updated_fields.append('code')
-        
-        # Update metadata if provided
-        if any(key in kwargs for key in ['description', 'tags', 'custom_fields']):
-            metadata = recipe.get_metadata()
-            
-            if 'description' in kwargs:
-                metadata['description'] = kwargs['description']
-                updated_fields.append('description')
-            
-            if 'tags' in kwargs:
-                metadata['tags'] = kwargs['tags']
-                updated_fields.append('tags')
-            
-            if 'custom_fields' in kwargs:
-                if 'customFields' not in metadata:
-                    metadata['customFields'] = {}
-                metadata['customFields'].update(kwargs['custom_fields'])
-                updated_fields.append('custom_fields')
-            
-            recipe.set_metadata(metadata)
-        
-        # Handle recipe-specific settings updates
-        if any(key in kwargs for key in ['engine_type', 'container_conf', 'resource_settings']):
-            settings = recipe.get_settings()
-            
-            if 'engine_type' in kwargs:
-                settings.set_engine_type(kwargs['engine_type'])
-                updated_fields.append('engine_type')
-            
-            if 'container_conf' in kwargs:
-                settings.set_container_conf(kwargs['container_conf'])
-                updated_fields.append('container_conf')
-            
-            if 'resource_settings' in kwargs:
-                settings.set_resource_settings(kwargs['resource_settings'])
-                updated_fields.append('resource_settings')
-            
-            settings.save()
-        
-        return {
-            "status": "ok",
-            "recipe_name": recipe_name,
-            "updated_fields": updated_fields,
-            "message": f"Recipe '{recipe_name}' updated successfully"
-        }
-        
+
+        if "code" in kwargs:
+            if settings.type not in CODE_RECIPE_TYPES:
+                return error(
+                    f"Recipe '{recipe_name}' (type '{settings.type}') is not a "
+                    "code recipe",
+                    "invalid_argument",
+                )
+            settings.set_payload(kwargs["code"])
+            updated_fields.append("code")
+
+        if "description" in kwargs:
+            settings.description = kwargs["description"]
+            updated_fields.append("description")
+
+        if "tags" in kwargs:
+            settings.tags = kwargs["tags"]
+            updated_fields.append("tags")
+
+        if "custom_fields" in kwargs:
+            settings.custom_fields = {
+                **(settings.custom_fields or {}),
+                **kwargs["custom_fields"],
+            }
+            updated_fields.append("custom_fields")
+
+        if "params" in kwargs:
+            settings.raw_params.update(kwargs["params"])
+            updated_fields.append("params")
+
+        settings.save()
+
+        return ok(
+            recipe_name=recipe_name,
+            updated_fields=updated_fields,
+            message=f"Recipe '{recipe_name}' updated successfully",
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to update recipe '{recipe_name}': {str(e)}"
-        }
+        return error(f"Failed to update recipe '{recipe_name}': {e}")
 
 
-def delete_recipe(
-    project_key: str,
-    recipe_name: str
-) -> Dict[str, Any]:
+def delete_recipe(project_key: str, recipe_name: str) -> dict[str, Any]:
     """
     Delete a recipe from a Dataiku DSS project.
-    
+
     Args:
         project_key: The project key containing the recipe
         recipe_name: Name of the recipe to delete
-    
+
     Returns:
         Dict with status and deletion details or error message
     """
     try:
-        project = get_project(project_key)
-        recipe = project.get_recipe(recipe_name)
-        
-        # Store recipe info before deletion
-        recipe_info = {
-            "id": recipe.id,
-            "type": recipe.type,
-            "name": recipe_name
-        }
-        
-        # Delete the recipe
+        recipe = get_project(project_key).get_recipe(recipe_name)
+        recipe_type = recipe.get_settings().type
         recipe.delete()
-        
-        return {
-            "status": "ok",
-            "deleted_recipe": recipe_info,
-            "message": f"Recipe '{recipe_name}' deleted successfully"
-        }
-        
+
+        return ok(
+            deleted_recipe={"name": recipe_name, "type": recipe_type},
+            message=f"Recipe '{recipe_name}' deleted successfully",
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to delete recipe '{recipe_name}': {str(e)}"
-        }
+        return error(f"Failed to delete recipe '{recipe_name}': {e}")
 
 
 def run_recipe(
     project_key: str,
     recipe_name: str,
-    build_mode: Optional[str] = None
-) -> Dict[str, Any]:
+    build_mode: Optional[str] = None,
+    wait: bool = True,
+) -> dict[str, Any]:
     """
     Run a recipe to build its outputs.
-    
+
     Args:
         project_key: The project key containing the recipe
         recipe_name: Name of the recipe to run
-        build_mode: Optional build mode:
-            - "RECURSIVE_BUILD": Default recursive build
-            - "NON_RECURSIVE_FORCED_BUILD": Force build without recursion
-            - "RECURSIVE_FORCED_BUILD": Force build with recursion
-    
+        build_mode: Optional build mode (default NON_RECURSIVE_FORCED_BUILD):
+            RECURSIVE_BUILD, NON_RECURSIVE_FORCED_BUILD, RECURSIVE_FORCED_BUILD
+        wait: Wait for the job to finish (False returns the job id at once)
+
     Returns:
-        Dict with status and job details or error message
+        Dict with the job state. "status" is "error" if the job did not
+        finish with state DONE.
     """
+    if build_mode and build_mode not in BUILD_MODES:
+        return error(
+            f"Invalid build_mode. Must be one of: {list(BUILD_MODES)}",
+            "invalid_argument",
+        )
+
     try:
-        project = get_project(project_key)
-        recipe = project.get_recipe(recipe_name)
-        
-        # Prepare run parameters
-        run_params = {}
-        if build_mode:
-            valid_modes = [
-                "RECURSIVE_BUILD",
-                "NON_RECURSIVE_FORCED_BUILD", 
-                "RECURSIVE_FORCED_BUILD"
-            ]
-            if build_mode not in valid_modes:
-                return {
-                    "status": "error",
-                    "message": f"Invalid build_mode. Must be one of: {valid_modes}"
-                }
-            run_params["job_type"] = build_mode
-        
-        # Run the recipe
-        job = recipe.run(**run_params)
-        
-        # Wait for completion and get result
-        job_result = job.wait_for_completion()
-        
-        return {
-            "status": "ok",
-            "recipe_name": recipe_name,
-            "job_id": job.id,
-            "job_status": job_result.get_outcome(),
-            "job_start_time": job_result.get_start_time(),
-            "job_end_time": job_result.get_end_time(),
-            "message": f"Recipe '{recipe_name}' executed successfully"
-        }
-        
+        recipe = get_project(project_key).get_recipe(recipe_name)
+        job = recipe.run(
+            job_type=build_mode or "NON_RECURSIVE_FORCED_BUILD", wait=False
+        )
+        if wait:
+            wait_for_job(job)
+        job_info = job_summary(job)
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to run recipe '{recipe_name}': {str(e)}"
-        }
+        return error(f"Failed to run recipe '{recipe_name}': {e}")
+
+    if not wait:
+        return ok(
+            recipe_name=recipe_name,
+            job=job_info,
+            message=(
+                f"Job {job.id} started; follow it with get_job_details"
+            ),
+        )
+
+    if job_info["state"] != "DONE":
+        return error(
+            f"Recipe '{recipe_name}' job {job.id} ended with state "
+            f"{job_info['state']}; see get_job_details for the log",
+            "job_failed",
+            recipe_name=recipe_name,
+            job=job_info,
+        )
+
+    return ok(
+        recipe_name=recipe_name,
+        job=job_info,
+        message=f"Recipe '{recipe_name}' executed successfully",
+    )
 
 
-def get_recipe_info(
-    project_key: str,
-    recipe_name: str
-) -> Dict[str, Any]:
+def get_recipe_info(project_key: str, recipe_name: str) -> dict[str, Any]:
     """
     Get detailed information about a recipe.
-    
+
     Args:
         project_key: The project key containing the recipe
         recipe_name: Name of the recipe to inspect
-    
+
     Returns:
         Dict with recipe information or error message
     """
     try:
-        project = get_project(project_key)
-        recipe = project.get_recipe(recipe_name)
-        
-        # Get recipe metadata
-        metadata = recipe.get_metadata()
-        
-        # Get recipe settings
+        recipe = get_project(project_key).get_recipe(recipe_name)
         settings = recipe.get_settings()
-        
-        # Get inputs and outputs
-        inputs = recipe.get_inputs()
-        outputs = recipe.get_outputs()
-        
-        return {
-            "status": "ok",
-            "recipe_info": {
-                "id": recipe.id,
+        raw = settings.get_recipe_raw_definition()
+        version = raw.get("versionTag", {}) or {}
+        creation = raw.get("creationTag", {}) or {}
+
+        return ok(
+            recipe_info={
                 "name": recipe_name,
-                "type": recipe.type,
-                "description": metadata.get("description", ""),
-                "tags": metadata.get("tags", []),
-                "inputs": [{"name": inp["ref"], "project": inp.get("projectKey", project_key)} for inp in inputs],
-                "outputs": [{"name": out["ref"], "project": out.get("projectKey", project_key)} for out in outputs],
-                "creation_date": metadata.get("creationDate"),
-                "last_modified": metadata.get("lastModifiedDate"),
-                "last_modified_by": metadata.get("lastModifiedBy", {}).get("login"),
-                "custom_fields": metadata.get("customFields", {})
+                "type": settings.type,
+                "description": settings.description or "",
+                "tags": settings.tags or [],
+                "custom_fields": settings.custom_fields or {},
+                "inputs": flat_refs(settings.get_recipe_inputs()),
+                "outputs": flat_refs(settings.get_recipe_outputs()),
+                "zone": raw.get("zone"),
+                "engine": (raw.get("params", {}) or {}).get("engineType"),
+                "is_code_recipe": settings.type in CODE_RECIPE_TYPES,
+                "created_by": (creation.get("lastModifiedBy") or {}).get(
+                    "login"
+                ),
+                "last_modified_by": (version.get("lastModifiedBy") or {}).get(
+                    "login"
+                ),
+                "last_modified_on": version.get("lastModifiedOn"),
             }
-        }
-        
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to get recipe info for '{recipe_name}': {str(e)}"
-        }
+        return error(f"Failed to get recipe info for '{recipe_name}': {e}")
 
 
 def list_recipes(
-    project_key: str,
-    recipe_type: Optional[str] = None
-) -> Dict[str, Any]:
+    project_key: str, recipe_type: Optional[str] = None
+) -> dict[str, Any]:
     """
     List all recipes in a project, optionally filtered by type.
-    
+
     Args:
         project_key: The project key to list recipes from
         recipe_type: Optional filter by recipe type
-    
+
     Returns:
         Dict with list of recipes or error message
     """
     try:
-        project = get_project(project_key)
-        
-        # Get all recipes
-        all_recipes = project.list_recipes()
-        
-        # Filter by type if specified
-        if recipe_type:
-            filtered_recipes = [r for r in all_recipes if r.get("type") == recipe_type]
-        else:
-            filtered_recipes = all_recipes
-        
-        return {
-            "status": "ok",
-            "recipes": [
-                {
-                    "name": recipe.get("name"),
-                    "type": recipe.get("type"),
-                    "id": recipe.get("id"),
-                    "inputs": recipe.get("inputs", []),
-                    "outputs": recipe.get("outputs", [])
-                }
-                for recipe in filtered_recipes
-            ],
-            "total_count": len(filtered_recipes),
-            "project_key": project_key
-        }
-        
+        all_recipes = get_project(project_key).list_recipes()
+
+        recipes = [
+            {
+                "name": r.get("name"),
+                "type": r.get("type"),
+                "tags": r.get("tags", []),
+                "inputs": flat_refs(r.get("inputs")),
+                "outputs": flat_refs(r.get("outputs")),
+            }
+            for r in all_recipes
+            if not recipe_type or r.get("type") == recipe_type
+        ]
+
+        return ok(
+            recipes=recipes,
+            total_count=len(recipes),
+            project_key=project_key,
+        )
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to list recipes in project '{project_key}': {str(e)}"
-        }
+        return error(
+            f"Failed to list recipes in project '{project_key}': {e}"
+        )

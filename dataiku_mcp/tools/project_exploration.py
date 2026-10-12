@@ -3,149 +3,71 @@ Project exploration tools for Dataiku MCP integration.
 """
 
 import re
-import json
-from typing import Dict, Any, List, Optional
-from dataiku_mcp.client import get_client, get_project
+from collections import Counter
+from itertools import islice
+from typing import Any, Dict, List, Optional
 
-def get_project_flow(
-    project_key: str
-) -> Dict[str, Any]:
+from dataiku_mcp.client import get_project
+from dataiku_mcp.tools._common import error, ok
+from dataiku_mcp.tools.classification_dataset import _cartographier_flow_interne
+
+MAX_SAMPLE_ROWS = 1000
+NUMERIC_TYPES = ("tinyint", "smallint", "int", "bigint", "float", "double")
+
+
+def get_project_flow(project_key: str) -> Dict[str, Any]:
     """
-    Get complete data flow/pipeline structure.
-    
+    Get the data flow of a project as a graph (datasets, recipes, edges).
+
     Args:
         project_key: The project key
-        
+
     Returns:
-        Dict containing flow structure and dependencies
+        Dict with nodes, edges, root nodes (no producer) and leaf nodes
+        (no consumer)
     """
     try:
-        project = get_project(project_key)
-        
-        # Get all project objects
-        datasets = project.list_datasets()
-        recipes = project.list_recipes()
-        
-        # Build flow structure
-        flow_nodes = []
-        flow_edges = []
-        
-        # Add datasets as nodes
-        for dataset in datasets:
-            dataset_info = {
-                "id": dataset["name"],
-                "name": dataset["name"],
-                "type": "dataset",
-                "dataset_type": dataset["type"],
-                "tags": dataset.get("tags", [])
-            }
-            flow_nodes.append(dataset_info)
-        
-        # Add recipes as nodes and create edges
-        for recipe in recipes:
-            recipe_info = {
-                "id": recipe["name"],
-                "name": recipe["name"],
-                "type": "recipe",
-                "recipe_type": recipe["type"],
-                "tags": recipe.get("tags", [])
-            }
-            flow_nodes.append(recipe_info)
-            
-            # Get recipe details for inputs/outputs
-            try:
-                recipe_obj = project.get_recipe(recipe["name"])
-                recipe_def = recipe_obj.get_definition()
-                
-                # Create edges from inputs to recipe
-                for input_def in recipe_def.get("inputs", []):
-                    input_ref = input_def["ref"]
-                    flow_edges.append({
-                        "from": input_ref,
-                        "to": recipe["name"],
-                        "type": "input"
-                    })
-                
-                # Create edges from recipe to outputs
-                for output_def in recipe_def.get("outputs", []):
-                    output_ref = output_def["ref"]
-                    flow_edges.append({
-                        "from": recipe["name"],
-                        "to": output_ref,
-                        "type": "output"
-                    })
-                    
-            except Exception as e:
-                # Skip recipes that can't be accessed
-                continue
-        
-        # Calculate dependencies
-        dependencies = {}
-        for edge in flow_edges:
-            if edge["type"] == "input":
-                # Recipe depends on dataset
-                recipe_name = edge["to"]
-                dataset_name = edge["from"]
-                
-                if recipe_name not in dependencies:
-                    dependencies[recipe_name] = {"depends_on": [], "used_by": []}
-                dependencies[recipe_name]["depends_on"].append(dataset_name)
-                
-                if dataset_name not in dependencies:
-                    dependencies[dataset_name] = {"depends_on": [], "used_by": []}
-                dependencies[dataset_name]["used_by"].append(recipe_name)
-            
-            elif edge["type"] == "output":
-                # Dataset depends on recipe
-                recipe_name = edge["from"]
-                dataset_name = edge["to"]
-                
-                if dataset_name not in dependencies:
-                    dependencies[dataset_name] = {"depends_on": [], "used_by": []}
-                dependencies[dataset_name]["depends_on"].append(recipe_name)
-                
-                if recipe_name not in dependencies:
-                    dependencies[recipe_name] = {"depends_on": [], "used_by": []}
-                dependencies[recipe_name]["used_by"].append(dataset_name)
-        
-        # Find root nodes (no dependencies) and leaf nodes (no dependents)
-        root_nodes = []
-        leaf_nodes = []
-        
-        for node_id, deps in dependencies.items():
-            if not deps["depends_on"]:
-                root_nodes.append(node_id)
-            if not deps["used_by"]:
-                leaf_nodes.append(node_id)
-        
-        # Calculate flow statistics
-        flow_stats = {
-            "total_nodes": len(flow_nodes),
-            "total_edges": len(flow_edges),
-            "datasets": len(datasets),
-            "recipes": len(recipes),
-            "root_nodes": len(root_nodes),
-            "leaf_nodes": len(leaf_nodes)
-        }
-        
-        return {
-            "status": "ok",
-            "project_key": project_key,
-            "flow": {
-                "nodes": flow_nodes,
-                "edges": flow_edges
-            },
-            "dependencies": dependencies,
-            "root_nodes": root_nodes,
-            "leaf_nodes": leaf_nodes,
-            "flow_stats": flow_stats
-        }
-        
+        graph = _cartographier_flow_interne(project_key)
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to get project flow: {str(e)}"
+        return error(f"Failed to get project flow of '{project_key}': {e}")
+
+    nodes = [
+        {
+            "id": n["id"],
+            "name": n["nom"],
+            "kind": "dataset" if n["categorie"] == "dataset" else "recipe",
+            "type": n.get("type"),
+            "connection": n.get("connexion"),
         }
+        for n in graph["noeuds"]
+    ]
+    edges = [
+        {"from": a["source"], "to": a["cible"]} for a in graph["aretes"]
+    ]
+
+    has_input = {e["to"] for e in edges}
+    has_output = {e["from"] for e in edges}
+    roots = sorted(n["id"] for n in nodes if n["id"] not in has_input)
+    leaves = sorted(n["id"] for n in nodes if n["id"] not in has_output)
+
+    result = ok(
+        project_key=project_key,
+        flow={"nodes": nodes, "edges": edges},
+        root_nodes=roots,
+        leaf_nodes=leaves,
+        flow_stats={
+            "datasets": graph["statistiques"]["nb_datasets"],
+            "recipes": graph["statistiques"]["nb_recettes"],
+            "edges": len(edges),
+            "root_nodes": len(roots),
+            "leaf_nodes": len(leaves),
+        },
+    )
+    if graph["erreurs"]:
+        result["warnings"] = [
+            f"Recipe {e['recette']}: {e['erreur']}" for e in graph["erreurs"]
+        ]
+    return result
 
 
 def search_project_objects(
@@ -186,8 +108,8 @@ def search_project_objects(
             
             for dataset in datasets:
                 name = dataset["name"]
-                description = dataset.get("description", "")
-                tags = dataset.get("tags", [])
+                description = dataset.get("description") or ""
+                tags = dataset.get("tags") or []
                 
                 # Check if matches
                 matches = False
@@ -203,7 +125,7 @@ def search_project_objects(
                 if matches:
                     matching_datasets.append({
                         "name": name,
-                        "type": dataset["type"],
+                        "type": dataset.get("type"),
                         "description": description,
                         "tags": tags,
                         "match_type": "name" if search_term.lower() in name.lower() else "metadata"
@@ -218,8 +140,8 @@ def search_project_objects(
             
             for recipe in recipes:
                 name = recipe["name"]
-                description = recipe.get("description", "")
-                tags = recipe.get("tags", [])
+                description = recipe.get("description") or ""
+                tags = recipe.get("tags") or []
                 
                 # Check if matches
                 matches = False
@@ -235,7 +157,7 @@ def search_project_objects(
                 if matches:
                     matching_recipes.append({
                         "name": name,
-                        "type": recipe["type"],
+                        "type": recipe.get("type"),
                         "description": description,
                         "tags": tags,
                         "match_type": "name" if search_term.lower() in name.lower() else "metadata"
@@ -250,8 +172,8 @@ def search_project_objects(
             
             for scenario in scenarios:
                 name = scenario["name"]
-                description = scenario.get("description", "")
-                tags = scenario.get("tags", [])
+                description = scenario.get("description") or ""
+                tags = scenario.get("tags") or []
                 
                 # Check if matches
                 matches = False
@@ -267,8 +189,8 @@ def search_project_objects(
                 if matches:
                     matching_scenarios.append({
                         "name": name,
-                        "id": scenario["id"],
-                        "type": scenario["type"],
+                        "id": scenario.get("id"),
+                        "type": scenario.get("type"),
                         "description": description,
                         "tags": tags,
                         "active": scenario.get("active", False),
@@ -294,175 +216,89 @@ def search_project_objects(
         }
         
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to search project objects: {str(e)}"
-        }
+        return error(f"Failed to search project objects: {e}")
 
 
 def get_dataset_sample(
     project_key: str,
     dataset_name: str,
     rows: int = 100,
-    columns: Optional[List[str]] = None
+    columns: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    Get sample data from datasets.
-    
+    Get the first rows of a dataset, with simple per-column statistics.
+
     Args:
         project_key: The project key
         dataset_name: Name of the dataset
-        rows: Number of sample rows
+        rows: Number of sample rows (max 1000)
         columns: Specific columns to include (optional)
-        
+
     Returns:
-        Dict containing sample data and schema
+        Dict containing sample data, schema and column statistics
     """
+    rows = max(1, min(int(rows), MAX_SAMPLE_ROWS))
+
     try:
-        project = get_project(project_key)
-        dataset = project.get_dataset(dataset_name)
-        
-        # Get dataset schema
-        schema = dataset.get_schema()
-        schema_columns = schema.get("columns", [])
-        
-        # Filter columns if specified
+        dataset = get_project(project_key).get_dataset(dataset_name)
+        schema_columns = dataset.get_schema().get("columns", [])
+        all_names = [c["name"] for c in schema_columns]
+
         if columns:
-            # Validate that all requested columns exist
-            available_columns = [col["name"] for col in schema_columns]
-            invalid_columns = [col for col in columns if col not in available_columns]
-            
-            if invalid_columns:
-                return {
-                    "status": "error",
-                    "message": f"Invalid columns: {invalid_columns}. Available columns: {available_columns}"
-                }
-            
-            # Filter schema to requested columns
-            filtered_schema_columns = [col for col in schema_columns if col["name"] in columns]
-        else:
-            filtered_schema_columns = schema_columns
-            columns = [col["name"] for col in schema_columns]
-        
-        # Get sample data
-        try:
-            if columns and len(columns) < len(schema_columns):
-                # If specific columns requested, get dataframe and select columns
-                df = dataset.get_dataframe(limit=rows)
-                df = df[columns]
-                sample_data = df.to_dict('records')
-            else:
-                # Get full sample
-                df = dataset.get_dataframe(limit=rows)
-                sample_data = df.to_dict('records')
-                
-            actual_rows = len(sample_data)
-            
-        except Exception as e:
-            # Fallback to row iterator if dataframe fails
-            try:
-                sample_data = []
-                for i, row in enumerate(dataset.iter_rows()):
-                    if i >= rows:
-                        break
-                    
-                    # Filter to requested columns if specified
-                    if columns:
-                        filtered_row = {col: row.get(col) for col in columns}
-                        sample_data.append(filtered_row)
-                    else:
-                        sample_data.append(row)
-                
-                actual_rows = len(sample_data)
-                
-            except Exception as e2:
-                return {
-                    "status": "error",
-                    "message": f"Failed to read sample data: {str(e2)}"
-                }
-        
-        # Calculate sample statistics
-        sample_stats = {
-            "requested_rows": rows,
-            "actual_rows": actual_rows,
-            "requested_columns": len(columns) if columns else len(schema_columns),
-            "total_columns": len(schema_columns),
-            "column_names": columns if columns else [col["name"] for col in schema_columns]
-        }
-        
-        # Generate column statistics for numeric columns
-        column_stats = []
-        for col in filtered_schema_columns:
-            col_name = col["name"]
-            col_type = col["type"]
-            
-            col_stat = {
-                "name": col_name,
-                "type": col_type,
-                "meaning": col.get("meaning", ""),
-                "description": col.get("description", "")
-            }
-            
-            # Calculate basic statistics for the column
-            if sample_data:
-                values = [row.get(col_name) for row in sample_data]
-                non_null_values = [v for v in values if v is not None]
-                
-                col_stat["null_count"] = len(values) - len(non_null_values)
-                col_stat["null_percentage"] = (len(values) - len(non_null_values)) / len(values) * 100 if values else 0
-                
-                if non_null_values:
-                    if col_type in ["int", "bigint", "float", "double"]:
-                        # Numeric statistics
-                        try:
-                            numeric_values = [float(v) for v in non_null_values if v is not None]
-                            if numeric_values:
-                                col_stat["min"] = min(numeric_values)
-                                col_stat["max"] = max(numeric_values)
-                                col_stat["mean"] = sum(numeric_values) / len(numeric_values)
-                        except:
-                            pass
-                    
-                    elif col_type == "string":
-                        # String statistics
-                        string_values = [str(v) for v in non_null_values]
-                        if string_values:
-                            col_stat["unique_count"] = len(set(string_values))
-                            col_stat["avg_length"] = sum(len(s) for s in string_values) / len(string_values)
-                            col_stat["max_length"] = max(len(s) for s in string_values)
-                            col_stat["min_length"] = min(len(s) for s in string_values)
-                            
-                            # Most common values
-                            from collections import Counter
-                            value_counts = Counter(string_values)
-                            col_stat["most_common"] = value_counts.most_common(5)
-            
-            column_stats.append(col_stat)
-        
-        # Get dataset metadata
-        dataset_settings = dataset.get_settings()
-        dataset_info = {
-            "name": dataset_name,
-            "type": dataset_settings.get_raw()["type"],
-            "format": dataset_settings.get_raw().get("formatType", "unknown"),
-            "connection": dataset_settings.get_raw().get("params", {}).get("connection", "unknown")
-        }
-        
-        return {
-            "status": "ok",
-            "project_key": project_key,
-            "dataset_info": dataset_info,
-            "sample_stats": sample_stats,
-            "schema": {
-                "columns": filtered_schema_columns,
-                "column_count": len(filtered_schema_columns)
-            },
-            "column_stats": column_stats,
-            "sample_data": sample_data
-        }
-        
+            unknown = [c for c in columns if c not in all_names]
+            if unknown:
+                return error(
+                    f"Unknown columns: {unknown}", "invalid_argument"
+                )
+        selected = columns or all_names
+        positions = [all_names.index(c) for c in selected]
+
+        sample_data = []
+        for row in islice(dataset.iter_rows(), rows):
+            sample_data.append({all_names[i]: row[i] for i in positions})
+
     except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Failed to get dataset sample: {str(e)}"
+        return error(f"Failed to read sample of '{dataset_name}': {e}")
+
+    column_stats = []
+    for col in schema_columns:
+        if col["name"] not in selected:
+            continue
+        values = [r.get(col["name"]) for r in sample_data]
+        non_null = [v for v in values if v not in (None, "")]
+        stat = {
+            "name": col["name"],
+            "type": col.get("type"),
+            "meaning": col.get("meaning"),
+            "null_count": len(values) - len(non_null),
+            "distinct_count": len({str(v) for v in non_null}),
         }
+        if col.get("type") in NUMERIC_TYPES:
+            numbers = []
+            for v in non_null:
+                try:
+                    numbers.append(float(v))
+                except (TypeError, ValueError):
+                    pass
+            if numbers:
+                stat["min"] = min(numbers)
+                stat["max"] = max(numbers)
+                stat["mean"] = sum(numbers) / len(numbers)
+        elif non_null:
+            stat["most_common"] = Counter(
+                str(v) for v in non_null
+            ).most_common(5)
+        column_stats.append(stat)
+
+    return ok(
+        project_key=project_key,
+        dataset_name=dataset_name,
+        sample_stats={
+            "requested_rows": rows,
+            "actual_rows": len(sample_data),
+            "total_columns": len(all_names),
+            "column_names": selected,
+        },
+        column_stats=column_stats,
+        sample_data=sample_data,
+    )
