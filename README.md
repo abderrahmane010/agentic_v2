@@ -36,6 +36,34 @@ claude mcp add dataiku-dss \
     -- uv run --directory /chemin/vers/agentic_v2 python scripts/mcp_server.py
 ```
 
+## Chat avec votre propre LLM (vLLM / API compatible OpenAI)
+
+Renseigner `VLLM_BASE_URL`, `VLLM_MODEL` et `OPENAI_API_KEY` dans `.env`, puis :
+
+```bash
+python scripts/chat_llm.py                       # chat interactif
+python scripts/chat_llm.py -q "Liste les datasets finaux du projet MON_PROJET"
+```
+
+Commandes directes (sans LLM, sortie complète) :
+
+- `/tables PROJET` : datasets classés en source / intermédiaire / final
+- `/dependances` : dépendances entre tous les projets, cycles et vagues de
+  migration proposées ; écrit un rapport Markdown avec graphe Mermaid dans
+  `rapports/`
+- `/dependances PROJET` : fournisseurs, consommateurs et prérequis de migration
+  d'un projet
+- `/migration PROJET` : inventaire technique avant migration Databricks
+  (stockage HDFS/Hive, moteurs des recettes, code spécifique Cloudera, plugins,
+  score de complexité) ; écrit un rapport Markdown et des CSV dans `rapports/`
+- `/migration` : le même résumé pour tous les projets, trié par complexité
+
+Le chat démarre le serveur MCP, donne ses outils au LLM et exécute les appels
+d'outils demandés. Par défaut seuls les outils en lecture sont exposés
+(`CHAT_READ_ONLY=true`). Le serveur vLLM doit être lancé avec
+`--enable-auto-tool-choice --tool-call-parser hermes` (Qwen) pour l'appel
+d'outils.
+
 ## Configuration (`.env`)
 
 | Variable | Défaut | Rôle |
@@ -46,6 +74,10 @@ claude mcp add dataiku-dss \
 | `DSS_READ_ONLY` | `false` (`true` dans `.env.sample`) | Bloque tous les outils qui modifient DSS |
 | `DSS_ALLOWED_PROJECTS` | vide = tous | Liste blanche de clés projet, séparées par des virgules |
 | `DSS_PROJECT_KEY` | - | Projet par défaut des scripts |
+| `VLLM_BASE_URL`, `VLLM_MODEL`, `OPENAI_API_KEY` | - | LLM utilisé par `scripts/chat_llm.py` |
+| `VLLM_INSECURE_TLS`, `VLLM_CA_BUNDLE` | `false`, vide | TLS du serveur LLM (certificat d'entreprise) |
+| `CHAT_READ_ONLY` | `true` | Le chat n'expose que les outils en lecture |
+| `CHAT_MAX_RESULT_CHARS` | `40000` | Taille max d'un résultat d'outil envoyé au LLM |
 
 ## Sécurité
 
@@ -125,6 +157,7 @@ Les types de recettes sont ceux de DSS : `python`, `pyspark`, `r`,
 | `scripts/mcp_server.py` | Point d'entrée du serveur (`--transport stdio\|sse`) |
 | `scripts/smoke_test.py` | Appelle chaque outil de lecture sur un vrai projet et affiche OK / ERREUR |
 | `scripts/classer_datasets.py` | Classification topologique des datasets d'un projet |
+| `scripts/chat_llm.py` | Chat en terminal avec un LLM compatible OpenAI (vLLM) utilisant les outils MCP |
 | `scripts/list_databricks_scenario_projects.py` | Projets avec un dataset Databricks déclencheur d'un scénario actif |
 
 ## Développement
