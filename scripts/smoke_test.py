@@ -144,7 +144,8 @@ def main() -> int:
               f"recette_code={code_recipe} scénario={scenario} job={job_id}")
 
     failures = [r for r in report if r["status"] != "ok"]
-    print(f"\n{len(report) - len(failures)}/{len(report)} outils OK", file=sys.stderr)
+    if not args.json:
+        print(f"\n{len(report) - len(failures)}/{len(report)} outils OK")
     return 1 if failures else 0
 
 

@@ -26,7 +26,7 @@ OTHER_LIBRARIES = {
     "insert", "isoformat", "loads", "most_common", "parse", "parse_args",
     "resource", "run", "safe_dump", "search", "setLevel", "signature",
     "tool", "wraps", "walk", "info", "warning", "error", "debug",
-    "exception", "list_tools", "call_tool", "read_resource", "glob", "exit", "getenv", "monotonic",
+    "exception", "list_tools", "call_tool", "read_resource", "glob", "exit", "getenv", "monotonic", "disable_warnings",
 }
 
 
