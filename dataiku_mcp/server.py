@@ -685,19 +685,26 @@ def dependances_inter_projets(
     project_key: Optional[str] = None,
     inclure_scenarios: bool = True,
     details: bool = False,
+    analyser_code: bool = True,
 ) -> Dict[str, Any]:
     """Dependencies BETWEEN Dataiku projects (which project uses data of
-    which other project), cycles and proposed migration waves.
-    Use it to plan a migration (e.g. to Databricks).
+    which other project), cycles, proposed migration waves and interface
+    tables (datasets of a project used by other projects, e.g. a table that
+    is final in its project but the source of another one).
+    Links come from recipes, scenarios, shared physical storage (same
+    table / path) and recipe code. Use it to plan a migration.
 
     Args:
         project_key: Optional. Focus on one project (its providers,
-            consumers, prerequisites and wave). Omit for the whole instance.
+            consumers, prerequisites, wave and interface tables). Omit for
+            the whole instance.
         inclure_scenarios: Also analyse scenarios (slower)
         details: Return every object of each link and unused shares
+        analyser_code: Also search recipe code for references to other
+            projects (one API call per code recipe)
     """
     return dependances_projets.dependances_inter_projets(
-        project_key, inclure_scenarios, details
+        project_key, inclure_scenarios, details, analyser_code
     )
 
 

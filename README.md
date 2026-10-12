@@ -53,6 +53,19 @@ Commandes directes (sans LLM, sortie complète) :
   `rapports/`
 - `/dependances PROJET` : fournisseurs, consommateurs et prérequis de migration
   d'un projet
+- `/interfaces [PROJET]` : tables d'un projet utilisées par d'autres projets
+  (y compris une table « finale » dans son projet), emplacements écrits par
+  plusieurs projets et sources externes partagées
+- `/projets`, `/scenarios PROJET`, `/echecs PROJET`, `/logs PROJET SCENARIO`,
+  `/connexions [PROJET]`, `/export PROJET` : voir `/aide` dans le chat
+
+Les dépendances entre projets sont détectées via les entrées des recettes,
+les scénarios, le **stockage physique partagé** (deux datasets sur la même
+table ou le même chemin, dont l'un est écrit par un projet) et le **code des
+recettes** (`dataiku.Dataset("PROJET.nom")`, tables SQL `schema.table` et
+chemins HDFS écrits par un autre projet). Ces liens comptent dans le calcul
+des vagues. Les noms construits dynamiquement dans le code et les
+consommateurs hors DSS (BI, exports) ne sont pas détectés.
 - `/migration PROJET` : inventaire technique avant migration Databricks
   (stockage HDFS/Hive, moteurs des recettes, code spécifique Cloudera, plugins,
   score de complexité) ; écrit un rapport Markdown et des CSV dans `rapports/`

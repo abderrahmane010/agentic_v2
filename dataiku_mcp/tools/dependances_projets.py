@@ -11,7 +11,15 @@ Sources analysées (lecture seule) :
 1. entrées des recettes référençant un autre projet ("PROJET.objet") ;
 2. scénarios (déclencheurs, étapes de build, lancement de scénarios)
    pointant vers un autre projet ;
-3. objets exposés (partages déclarés) dans les paramètres des projets.
+3. objets exposés (partages déclarés) dans les paramètres des projets ;
+4. emplacements physiques partagés : un projet écrit une table ou un
+   chemin que le dataset d'un autre projet lit (voir liens_caches) ;
+5. code des recettes : dataiku.Dataset("PROJET.nom"), tables SQL
+   "schema.table" ou chemins écrits par un autre projet.
+
+Les tables d'interface (datasets d'un projet utilisés par un autre) sont
+listées avec leur statut local : une table "finale" dans son projet peut
+être la source d'un autre projet.
 
 Convention : un lien "fournisseur -> consommateur" signifie que le
 consommateur utilise un objet du fournisseur. Le fournisseur doit donc
@@ -24,6 +32,8 @@ from typing import Any, Optional
 
 from dataiku_mcp.client import get_project, list_projects
 from dataiku_mcp.securite import filtrer_projets
+from dataiku_mcp.tools import liens_caches
+from dataiku_mcp.tools._common import CODE_RECIPE_TYPES, flat_refs
 from dataiku_mcp.tools.classification_dataset import _as_dict
 
 logger = logging.getLogger(__name__)
@@ -36,6 +46,7 @@ def dependances_inter_projets(
     project_key: Optional[str] = None,
     inclure_scenarios: bool = True,
     details: bool = False,
+    analyser_code: bool = True,
 ) -> dict[str, Any]:
     """Analyse les dépendances entre les projets accessibles.
 
@@ -47,6 +58,8 @@ def dependances_inter_projets(
             un appel API par scénario).
         details: lister tous les objets de chaque lien et les partages
             déclarés non utilisés.
+        analyser_code: lire le code des recettes pour y trouver des
+            références à d'autres projets (un appel API par recette de code).
     """
     projets = sorted(filtrer_projets(list_projects()))
     connus = set(projets)
@@ -57,6 +70,8 @@ def dependances_inter_projets(
     )
     partages: dict[tuple[str, str], set[str]] = defaultdict(set)
     erreurs: list[dict[str, str]] = []
+    # projet -> {"datasets": {nom: def}, "ecrits": set, "lus": set, "codes": {}}
+    catalogue: dict[str, dict[str, Any]] = {}
 
     for numero, cle in enumerate(projets, start=1):
         # Visible dans le terminal (stderr) : l'analyse peut être longue.
@@ -67,10 +82,14 @@ def dependances_inter_projets(
             erreurs.append({"projet": cle, "erreur": str(exc)})
             continue
 
-        _analyser_recettes(projet, cle, liens, erreurs)
+        catalogue[cle] = _inventorier_projet(projet, cle, analyser_code, erreurs)
+        _analyser_recettes(cle, catalogue[cle]["recettes"], liens)
         if inclure_scenarios:
             _analyser_scenarios(projet, cle, liens, erreurs)
         _analyser_partages(projet, cle, partages, erreurs)
+
+    constats = _ajouter_liens_caches(catalogue, connus, liens)
+    interfaces = _tables_interface(liens, catalogue)
 
     graphe = _construire_graphe(projets, liens)
     cycles = _composantes_fortement_connexes(projets, graphe)
@@ -78,6 +97,13 @@ def dependances_inter_projets(
 
     resultat = _mettre_en_forme(
         projets, connus, liens, partages, cycles, vagues, erreurs, details
+    )
+    resultat["tables_interface"] = interfaces
+    resultat["emplacements_partages"] = constats
+    resultat["statistiques"].update(
+        nb_tables_interface=len(interfaces),
+        nb_ecritures_multiples=len(constats["ecritures_multiples"]),
+        nb_sources_externes_partagees=len(constats["sources_externes_partagees"]),
     )
 
     if project_key:
@@ -101,54 +127,133 @@ def _projet_externe(ref: Any, projet_courant: str) -> Optional[tuple[str, str]]:
     return autre_projet, objet
 
 
-def _refs_entrees_recette(projet: Any, brut: dict[str, Any]) -> list[str]:
-    """Références des entrées d'une recette.
+def _inventorier_projet(
+    projet: Any, cle: str, analyser_code: bool, erreurs: list[dict[str, str]]
+) -> dict[str, Any]:
+    """Datasets, datasets écrits/lus par les recettes et code des recettes."""
+    infos: dict[str, Any] = {
+        "datasets": {},
+        "ecrits": set(),
+        "lus": set(),
+        "codes": {},
+        "recettes": [],  # [(nom, refs des entrées)]
+    }
 
-    La liste des recettes contient en général les entrées ; sinon on lit
-    les paramètres de la recette (un appel API de plus).
-    """
-    entrees = brut.get("inputs")
-
-    if isinstance(entrees, dict):
-        refs = []
-        for role in entrees.values():
-            for item in (role or {}).get("items", []) or []:
-                ref = (item or {}).get("ref")
-                if ref:
-                    refs.append(ref)
-        return refs
-
-    settings = projet.get_recipe(brut["name"]).get_settings()
-    return [str(ref) for ref in settings.get_flat_input_refs()]
-
-
-def _analyser_recettes(
-    projet: Any,
-    cle: str,
-    liens: dict,
-    erreurs: list[dict[str, str]],
-) -> None:
     try:
-        recettes = projet.list_recipes()
+        for item in projet.list_datasets():
+            brut = _as_dict(item)
+            if brut.get("name"):
+                infos["datasets"][brut["name"]] = brut
+    except Exception as exc:
+        erreurs.append({"projet": cle, "erreur": f"datasets : {exc}"})
+
+    try:
+        recettes = [_as_dict(r) for r in projet.list_recipes()]
     except Exception as exc:
         erreurs.append({"projet": cle, "erreur": f"recettes : {exc}"})
-        return
+        recettes = []
 
-    for item in recettes:
-        brut = _as_dict(item)
+    for brut in recettes:
         nom = brut.get("name")
         if not nom:
             continue
-
+        code = analyser_code and brut.get("type") in CODE_RECIPE_TYPES
+        # La liste contient en général entrées et sorties ; sinon (ou pour
+        # lire le code) on charge les paramètres de la recette.
+        complete = isinstance(brut.get("inputs"), dict) and isinstance(
+            brut.get("outputs"), dict
+        )
         try:
-            refs = _refs_entrees_recette(projet, brut)
+            if complete and not code:
+                entrees = flat_refs(brut.get("inputs"))
+                sorties = flat_refs(brut.get("outputs"))
+            else:
+                settings = projet.get_recipe(nom).get_settings()
+                entrees = [str(r) for r in settings.get_flat_input_refs()]
+                sorties = [str(r) for r in settings.get_flat_output_refs()]
+                if code:
+                    infos["codes"][nom] = settings.str_payload
         except Exception as exc:
-            erreurs.append(
-                {"projet": cle, "erreur": f"recette {nom} : {exc}"}
-            )
+            erreurs.append({"projet": cle, "erreur": f"recette {nom} : {exc}"})
             continue
 
-        for ref in refs:
+        infos["recettes"].append((nom, entrees))
+        infos["ecrits"].update(sorties)
+        infos["lus"].update(entrees)
+
+    return infos
+
+
+def _ajouter_liens_caches(
+    catalogue: dict[str, dict[str, Any]], connus: set[str], liens: dict
+) -> dict[str, list[dict[str, Any]]]:
+    """Ajoute au graphe les liens de stockage physique et de code.
+
+    Returns:
+        Les constats sur les emplacements partagés (écritures multiples,
+        sources externes lues par plusieurs projets).
+    """
+    stockage, constats = liens_caches.liens_stockage(catalogue)
+    for fournisseur, objet, consommateur, dataset_local in stockage:
+        liens[(fournisseur, consommateur)][objet].add(f"stockage:{dataset_local}")
+
+    for fournisseur, objet, consommateur, recette in liens_caches.liens_code(
+        catalogue, connus
+    ):
+        liens[(fournisseur, consommateur)][objet].add(f"code:{recette}")
+
+    return constats
+
+
+def _tables_interface(
+    liens: dict, catalogue: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Datasets d'un projet utilisés par d'autres projets.
+
+    statut_local : position du dataset dans son propre projet. Une table
+    "finale" localement mais lue ailleurs est un contrat entre projets.
+    """
+    consommateurs: dict[tuple[str, str], dict[str, set[str]]] = defaultdict(
+        lambda: defaultdict(set)
+    )
+    for (fournisseur, consommateur), objets in liens.items():
+        datasets = (catalogue.get(fournisseur) or {}).get("datasets") or {}
+        for objet, origines in objets.items():
+            if objet in datasets:
+                consommateurs[(fournisseur, objet)][consommateur].update(origines)
+
+    interfaces = []
+    for (projet, dataset), usages in sorted(consommateurs.items()):
+        infos = catalogue[projet]
+        ecrit, lu = dataset in infos["ecrits"], dataset in infos["lus"]
+        if ecrit and not lu:
+            statut = "finale"
+        elif ecrit:
+            statut = "intermediaire"
+        else:
+            statut = "source (non produite par le projet)"
+        interfaces.append(
+            {
+                "projet": projet,
+                "dataset": dataset,
+                "statut_local": statut,
+                "emplacement": liens_caches.emplacement(
+                    projet, infos["datasets"][dataset]
+                ),
+                "consommateurs": [
+                    {"projet": c, "via": sorted(o)} for c, o in sorted(usages.items())
+                ],
+            }
+        )
+    return interfaces
+
+
+def _analyser_recettes(
+    cle: str, recettes: list[tuple[str, list[str]]], liens: dict
+) -> None:
+    """Entrées de recettes qui référencent un autre projet ("PROJET.objet")."""
+    for nom, entrees in recettes:
+        for ref in entrees:
             externe = _projet_externe(ref, cle)
             if externe:
                 fournisseur, objet = externe
@@ -164,6 +269,7 @@ def _references_projets(valeur: Any, projet_courant: str) -> list[tuple[str, str
         if isinstance(autre, str) and autre and autre != projet_courant:
             objet = (
                 valeur.get("itemId")
+                or valeur.get("datasetName")
                 or valeur.get("scenarioId")
                 or valeur.get("id")
                 or valeur.get("name")
@@ -425,8 +531,10 @@ def _mettre_en_forme(
             "Vague 1 = projets sans dépendance amont. Un projet doit être "
             "migré après (ou avec) ses fournisseurs. Les projets d'un cycle "
             "doivent être migrés ensemble. Les projets isolés peuvent être "
-            "migrés à tout moment. Les accès faits dynamiquement dans le "
-            "code (SQL, chemins HDFS) ne sont pas détectés."
+            "migrés à tout moment. Liens détectés via les recettes, les "
+            "scénarios, le stockage physique partagé et le code (références "
+            "explicites). Les noms construits dynamiquement dans le code et "
+            "les consommateurs hors DSS (BI, exports) ne sont pas détectés."
         ),
     }
 
@@ -477,6 +585,14 @@ def _centrer_sur_projet(
         "utilise_par": consommateurs,
         "prerequis_migration": sorted(prerequis),
         "cycle": cycle,
+        "tables_interface_produites": [
+            t for t in resultat["tables_interface"] if t["projet"] == project_key
+        ],
+        "tables_interface_consommees": [
+            t
+            for t in resultat["tables_interface"]
+            if any(c["projet"] == project_key for c in t["consommateurs"])
+        ],
         "erreurs": resultat["erreurs"],
         "note": resultat["note"],
     }

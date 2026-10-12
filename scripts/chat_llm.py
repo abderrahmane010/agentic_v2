@@ -57,8 +57,9 @@ datasets, recettes, scénarios, jobs...).
 - Quand tu listes des éléments, donne-les TOUS, sans en omettre ni
   résumer par "...", et indique le total.
 - Pour connaître les projets disponibles : list_dss_projects.
-- Pour les liens entre projets, l'ordre ou les vagues de migration :
-  dependances_inter_projets.
+- Pour les liens entre projets, l'ordre ou les vagues de migration, ou
+  savoir si une table (même "finale") est utilisée par un autre projet :
+  dependances_inter_projets (champ tables_interface).
 - Pour la complexité de migration vers Databricks, les technologies
   (HDFS, Hive, Impala, Spark) ou le code spécifique Cloudera :
   inventaire_technique_migration.
@@ -206,6 +207,9 @@ def _rapport_dependances_markdown(donnees: dict[str, Any]) -> str:
         f"- Projets isolés (migrables à tout moment) : {stats['nb_projets_isoles']}",
         f"- Cycles (projets à migrer ensemble) : {stats['nb_cycles']}",
         f"- Vagues de migration proposées : {stats['nb_vagues']}",
+        f"- Tables d'interface entre projets : {stats.get('nb_tables_interface', 0)}",
+        f"- Emplacements écrits par plusieurs projets : "
+        f"{stats.get('nb_ecritures_multiples', 0)}",
         "",
         "## Graphe",
         "",
@@ -229,6 +233,9 @@ def _rapport_dependances_markdown(donnees: dict[str, Any]) -> str:
         "",
         "## Détail des liens",
         "",
+        "Via : recette (entrée de recette), scenario, stockage (même table ou "
+        "chemin physique), code (référence dans le code d'une recette).",
+        "",
         "| Fournisseur | Consommateur | Nb objets | Via | Objets |",
         "|---|---|---|---|---|",
     ]
@@ -238,6 +245,39 @@ def _rapport_dependances_markdown(donnees: dict[str, Any]) -> str:
             f"{lien['nb_objets']} | {', '.join(lien['via'])} | "
             f"{', '.join(lien['objets'])} |"
         )
+
+    interfaces = donnees.get("tables_interface") or []
+    if interfaces:
+        lignes += [
+            "",
+            "## Tables d'interface (utilisées par d'autres projets)",
+            "",
+            "Contrats entre projets : migrer le producteur d'abord et garder "
+            "nom, schéma et emplacement, ou synchroniser les deux plateformes "
+            "pendant la transition.",
+            "",
+            "| Projet | Dataset | Statut local | Emplacement | Consommateurs (via) |",
+            "|---|---|---|---|---|",
+        ]
+        for table in interfaces:
+            conso = ", ".join(
+                f"{c['projet']} ({', '.join(sorted({v.split(':')[0] for v in c['via']}))})"
+                for c in table["consommateurs"]
+            )
+            lignes.append(
+                f"| {table['projet']} | {table['dataset']} | "
+                f"{table['statut_local']} | {table['emplacement'] or '-'} | {conso} |"
+            )
+
+    emplacements = donnees.get("emplacements_partages") or {}
+    if emplacements.get("ecritures_multiples"):
+        lignes += ["", "## ⚠️ Emplacements écrits par plusieurs projets", ""]
+        for e in emplacements["ecritures_multiples"]:
+            lignes.append(f"- `{e['emplacement']}` : {', '.join(e['ecrivains'])}")
+    if emplacements.get("sources_externes_partagees"):
+        lignes += ["", "## Sources externes lues par plusieurs projets", ""]
+        for e in emplacements["sources_externes_partagees"]:
+            lignes.append(f"- `{e['emplacement']}` : {', '.join(e['datasets'])}")
 
     externes = donnees.get("projets_externes_ou_inaccessibles") or {}
     if externes:
@@ -317,6 +357,10 @@ async def _afficher_dependances(session: ClientSession, commande: str) -> None:
         print(f"\n📋 À migrer avant : {', '.join(prerequis) or 'aucun'}")
         if donnees.get("cycle"):
             print(f"🔁 Cycle, à migrer ensemble : {' ↔ '.join(donnees['cycle'])}")
+        _afficher_interfaces(donnees.get("tables_interface_produites") or [],
+                             "📤 Tables d'interface produites")
+        _afficher_interfaces(donnees.get("tables_interface_consommees") or [],
+                             "📥 Tables d'interface consommées")
         _afficher_erreurs_lecture(donnees.get("erreurs") or [])
         return
 
@@ -327,6 +371,9 @@ async def _afficher_dependances(session: ClientSession, commande: str) -> None:
         print(f"  Vague {vague['vague']} : {', '.join(vague['projets'])}")
     for cycle in donnees["cycles"]:
         print(f"  🔁 Cycle : {' ↔ '.join(cycle)}")
+    print(f"  {stats.get('nb_tables_interface', 0)} tables d'interface, "
+          f"{stats.get('nb_ecritures_multiples', 0)} emplacements écrits par "
+          "plusieurs projets (détail : /interfaces)")
     _afficher_erreurs_lecture(donnees.get("erreurs") or [])
 
     dossier = RACINE / "rapports"
@@ -334,6 +381,55 @@ async def _afficher_dependances(session: ClientSession, commande: str) -> None:
     fichier = dossier / f"dependances_inter_projets_{datetime.now():%Y%m%d_%H%M}.md"
     fichier.write_text(_rapport_dependances_markdown(donnees), encoding="utf-8")
     print(f"\n📄 Rapport complet : {fichier}")
+
+
+def _via(consommateur: dict[str, Any]) -> str:
+    return ", ".join(sorted({v.split(":", 1)[0] for v in consommateur["via"]}))
+
+
+def _afficher_interfaces(tables: list[dict[str, Any]], titre: str) -> None:
+    print(f"\n{titre} ({len(tables)}) :")
+    if not tables:
+        print("  aucune")
+    for table in tables:
+        consommateurs = ", ".join(
+            f"{c['projet']} [{_via(c)}]" for c in table["consommateurs"]
+        )
+        print(f"  - {table['projet']}.{table['dataset']} ({table['statut_local']})"
+              f" → {consommateurs}")
+
+
+async def _afficher_tables_interface(session: ClientSession, commande: str) -> None:
+    """Commande /interfaces [PROJET] : tables utilisées par d'autres projets."""
+    morceaux = commande.split()
+    projet = morceaux[1] if len(morceaux) > 1 else None
+    print("⏳ Analyse des projets (peut prendre plusieurs minutes)...")
+    arguments: dict[str, Any] = {"details": True}
+    if projet:
+        arguments["project_key"] = projet
+    donnees = await _appeler(session, "dependances_inter_projets", arguments)
+    if not donnees:
+        return
+
+    if projet:
+        _afficher_interfaces(donnees["tables_interface_produites"],
+                             f"📤 Tables de {projet} utilisées ailleurs")
+        _afficher_interfaces(donnees["tables_interface_consommees"],
+                             f"📥 Tables d'autres projets utilisées par {projet}")
+    else:
+        _afficher_interfaces(donnees["tables_interface"], "🔗 Tables d'interface")
+        constats = donnees["emplacements_partages"]
+        if constats["ecritures_multiples"]:
+            print("\n⚠️  Emplacements écrits par plusieurs projets :")
+            for e in constats["ecritures_multiples"]:
+                print(f"  - {e['emplacement']} : {', '.join(e['ecrivains'])}")
+        if constats["sources_externes_partagees"]:
+            print("\nℹ️  Sources externes lues par plusieurs projets :")
+            for e in constats["sources_externes_partagees"]:
+                print(f"  - {e['emplacement']} : {', '.join(e['datasets'])}")
+    _afficher_erreurs_lecture(donnees.get("erreurs") or [])
+    print("\nStatut local « finale » + consommateurs = contrat entre projets : "
+          "à migrer en premier, même nom, schéma et emplacement.")
 
 
 _ICONES_GRAVITE = {"haute": "🔴", "moyenne": "🟠", "basse": "🟡"}
@@ -416,6 +512,7 @@ AIDE = """Commandes directes (sans LLM, sortie complète) :
   /connexions [PROJET]           connexions DSS (et leur usage par le projet)
   /export PROJET                 configuration complète du projet -> rapports/
   /dependances [PROJET]          dépendances inter-projets et vagues de migration
+  /interfaces [PROJET]           tables d'un projet utilisées par d'autres projets
   /migration [PROJET]            inventaire technique avant migration Databricks
   /outils                        outils disponibles pour le LLM
   /aide                          cette aide
@@ -625,6 +722,7 @@ COMMANDES = {
     "/connexions": _afficher_connexions,
     "/export": _exporter_projet,
     "/dependances": _afficher_dependances,
+    "/interfaces": _afficher_tables_interface,
     "/migration": _afficher_migration,
 }
 
