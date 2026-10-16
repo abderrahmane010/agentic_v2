@@ -128,3 +128,32 @@ def test_moteur_non_selectionnable_meme_ok_est_indisponible(dss):
     assert indispo["HIVE"]["raison"] == "Not available with redispatch partitioning"
     assert indispo["SPARK"]["raison"].startswith("indisponible")
     assert join["bascule"]["possible"] is False
+
+
+def test_erreur_prime_sur_is_selectable(dss):
+    """Statut réel DSS 14.1.1 (DIAGNOSTIC_DSS_V2) : isSelectable=True mais
+    statusWarnLevel ERROR -> moteur indisponible."""
+    dss.state["recipe_status"]["join_out"] = {
+        "selectedEngine": {"type": "DSS", "variant": "STREAM", "variantLabel": "Stream",
+                           "isSelectable": True, "statusWarnLevel": "OK"},
+        "engines": [
+            {"type": "DSS", "variant": "STREAM", "variantLabel": "Stream",
+             "isSelectable": True, "statusWarnLevel": "OK", "recommended": False},
+            {"type": "HIVE", "isSelectable": True, "recommended": True,
+             "statusWarnLevel": "ERROR",
+             "statusMessage": "Not available with redispatch partitioning"},
+            {"type": "SPARK", "variant": "SPARK_SQL", "variantLabel": "Spark SQL",
+             "isSelectable": True, "statusWarnLevel": "ERROR",
+             "statusMessage": "Not available with redispatch partitioning"},
+        ],
+    }
+    join = moteurs.inventaire_moteurs("PROJ", "join_out", "SPARK")["recettes"][0]
+    assert [m["moteur"] for m in join["moteurs_disponibles"]] == ["DSS"]
+    indispo = {m["moteur"]: m for m in join["moteurs_indisponibles"]}
+    assert indispo["HIVE"]["raison"] == "Not available with redispatch partitioning"
+    assert indispo["HIVE"]["recommande"] is True
+    assert indispo["SPARK"]["variante"] == "Spark SQL"
+    assert join["bascule"] == {
+        "cible": "SPARK", "possible": False,
+        "raison": "Not available with redispatch partitioning",
+    }

@@ -74,10 +74,14 @@ def _raison(moteur: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _en_erreur(moteur: dict[str, Any]) -> bool:
+    """statusWarnLevel ERROR : DSS refuse ce moteur, même si isSelectable
+    vaut True (cas réel : "Not available with redispatch partitioning")."""
+    return str(moteur.get("statusWarnLevel", "")).upper() == "ERROR"
+
+
 def _selectionnable(moteur: dict[str, Any]) -> bool:
-    if "isSelectable" in moteur:
-        return bool(moteur["isSelectable"])
-    return str(moteur.get("statusWarnLevel", "OK")).upper() != "ERROR"
+    return bool(moteur.get("isSelectable", True)) and not _en_erreur(moteur)
 
 
 def _analyser_moteurs(
@@ -149,7 +153,11 @@ def _analyser_moteurs(
         # autre choix : plugins, recettes à moteur unique). Tout autre moteur
         # non sélectionnable est indisponible, même avec statusWarnLevel OK
         # (ex. "Not available with redispatch partitioning").
-        impose = not moteur.get("isSelectable", True) and entree["moteur"] == selectionne
+        impose = (
+            not moteur.get("isSelectable", True)
+            and not _en_erreur(moteur)
+            and entree["moteur"] == selectionne
+        )
         if impose:
             entree["impose"] = True
         if _selectionnable(moteur) or impose:
