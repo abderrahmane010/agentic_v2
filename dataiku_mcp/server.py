@@ -26,6 +26,7 @@ from dataiku_mcp.tools import (
     code_development,
     datasets,
     dependances_projets,
+    moteurs,
     environment_config,
     inventaire_migration,
     monitoring_debug,
@@ -529,6 +530,28 @@ def clone_scenario(
 # ===========================================================================
 # Code development tools
 # ===========================================================================
+@mcp.tool()
+@outil_securise()
+def inventaire_moteurs(
+    project_key: str,
+    recipe_name: Optional[str] = None,
+    moteur_cible: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execution engines of the recipes of a project (the "Engine" menu
+    above RUN): configured engine, engine actually selected by DSS,
+    available and unavailable engines with DSS's reason, and whether each
+    recipe can switch to a target engine (e.g. moteur_cible="SPARK").
+    Read-only: nothing is changed in DSS.
+
+    Args:
+        project_key: The project key
+        recipe_name: Optional, a single recipe
+        moteur_cible: Optional target engine to evaluate (SPARK, HIVE,
+            IMPALA, SQL, DSS...)
+    """
+    return moteurs.inventaire_moteurs(project_key, recipe_name, moteur_cible)
+
+
 @mcp.tool()
 @outil_securise()
 def get_recipe_code(project_key: str, recipe_name: str) -> Dict[str, Any]:

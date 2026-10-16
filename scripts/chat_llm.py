@@ -67,6 +67,9 @@ datasets, recettes, scénarios, jobs...).
   build) : get_dataset_info ; colonnes : inspect_dataset_schema ;
   volumétrie / métriques : check_dataset_metrics ; aperçu des données :
   get_dataset_sample.
+- Moteur d'exécution des recettes (menu Engine), moteurs disponibles ou
+  non, possibilité de passer d'un moteur à un autre (ex. HIVE vers
+  SPARK) : inventaire_moteurs (option moteur_cible).
 - Détail d'une recette (type, entrées/sorties, moteur) : get_recipe_info ;
   son code : get_recipe_code ; SQL d'une recette visuelle :
   get_generated_sql.
@@ -432,6 +435,48 @@ async def _afficher_tables_interface(session: ClientSession, commande: str) -> N
           "à migrer en premier, même nom, schéma et emplacement.")
 
 
+async def _afficher_moteurs(session: ClientSession, commande: str) -> None:
+    """Commande /moteurs PROJET [CIBLE] : moteurs des recettes, sans LLM."""
+    morceaux = commande.split()
+    if len(morceaux) < 2:
+        print("Usage : /moteurs PROJET [MOTEUR_CIBLE]   (ex. /moteurs AEL SPARK)")
+        return
+    arguments: dict[str, Any] = {"project_key": morceaux[1]}
+    if len(morceaux) > 2:
+        arguments["moteur_cible"] = morceaux[2]
+    print("⏳ Lecture du statut de chaque recette...")
+    donnees = await _appeler(session, "inventaire_moteurs", arguments)
+    if not donnees:
+        return
+
+    synthese = donnees["synthese"]
+    repartition = ", ".join(
+        f"{m} {n}" for m, n in sorted(synthese["par_moteur_selectionne"].items())
+    )
+    print(f"\nProjet {morceaux[1]} — {synthese['nb_recettes']} recettes : {repartition}")
+    for r in donnees["recettes"]:
+        dispo = ", ".join(m["moteur"] for m in r["moteurs_disponibles"]) or "-"
+        print(f"\n  ⚙️  {r['recette']} [{r['type']}] : {r['moteur_selectionne']}"
+              f" (configuré : {r['moteur_configure']})")
+        print(f"     ✅ disponibles : {dispo}")
+        for m in r["moteurs_indisponibles"]:
+            print(f"     ❌ {m['moteur']} : {m['raison']}")
+        if r.get("note"):
+            print(f"     ℹ️  {r['note']}")
+        if r.get("bascule"):
+            b = r["bascule"]
+            print(f"     {'🟢' if b['possible'] else '🔴'} vers {b['cible']} : {b['raison']}")
+
+    bascule = synthese.get("bascule_vers")
+    if bascule:
+        print(f"\n📊 Bascule vers {bascule['cible']} : {bascule['deja_sur_cible']} déjà, "
+              f"{len(bascule['possibles'])} possibles, "
+              f"{len(bascule['impossibles'])} impossibles")
+    for e in donnees.get("erreurs", []):
+        print(f"⚠️  {e['recette']} : {e['erreur']}")
+    print("\nLecture seule : aucune modification dans DSS.")
+
+
 _ICONES_GRAVITE = {"haute": "🔴", "moyenne": "🟠", "basse": "🟡"}
 
 
@@ -513,6 +558,8 @@ AIDE = """Commandes directes (sans LLM, sortie complète) :
   /export PROJET                 configuration complète du projet -> rapports/
   /dependances [PROJET]          dépendances inter-projets et vagues de migration
   /interfaces [PROJET]           tables d'un projet utilisées par d'autres projets
+  /moteurs PROJET [CIBLE]        moteurs des recettes (actuel, disponibles,
+                                 bascule possible vers CIBLE, ex. SPARK)
   /migration [PROJET]            inventaire technique avant migration Databricks
   /outils                        outils disponibles pour le LLM
   /aide                          cette aide
@@ -723,6 +770,7 @@ COMMANDES = {
     "/export": _exporter_projet,
     "/dependances": _afficher_dependances,
     "/interfaces": _afficher_tables_interface,
+    "/moteurs": _afficher_moteurs,
     "/migration": _afficher_migration,
 }
 

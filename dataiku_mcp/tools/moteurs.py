@@ -1,0 +1,245 @@
+"""
+Inventaire des moteurs d'exécution des recettes (lecture seule).
+
+Pour chaque recette : moteur configuré (menu "Engine" au-dessus de RUN),
+moteur que DSS sélectionne réellement, moteurs disponibles et
+indisponibles avec la raison donnée par DSS, et possibilité de passer à un
+moteur cible (ex. HIVE -> SPARK).
+
+Source : GET /projects/{projet}/recipes/{recette}/status
+(DSSRecipe.get_status), le même calcul que l'interface DSS quand on ouvre
+la recette. Rien n'est modifié ni sauvegardé dans DSS.
+"""
+
+import logging
+from collections import Counter
+from typing import Any, Optional
+
+from dataiku_mcp.client import get_project
+from dataiku_mcp.tools._common import CODE_RECIPE_TYPES, error, ok
+from dataiku_mcp.tools.classification_dataset import _as_dict
+
+logger = logging.getLogger(__name__)
+
+# Moteur imposé par le type des recettes de code (pas de menu "Engine").
+_MOTEUR_RECETTE_CODE = {
+    "python": "PYTHON (local ou conteneur)",
+    "cpython": "PYTHON (local ou conteneur)",
+    "r": "R (local ou conteneur)",
+    "pyspark": "SPARK",
+    "sparkr": "SPARK",
+    "spark_scala": "SPARK",
+    "spark_sql_query": "SPARK",
+    "sql_query": "SQL (base de la connexion)",
+    "sql_script": "SQL (base de la connexion)",
+    "hive": "HIVE",
+    "impala": "IMPALA",
+    "shell": "SHELL",
+}
+
+_SANS_RAISON = "indisponible (raison non fournie par DSS)"
+
+
+def _type_moteur(moteur: dict[str, Any]) -> str:
+    return str(moteur.get("type") or moteur.get("engineType") or "?").upper()
+
+
+def _raison(moteur: dict[str, Any]) -> Optional[str]:
+    """Message de DSS expliquant l'état d'un moteur."""
+    for cle in ("statusMessage", "message", "reason", "details"):
+        valeur = moteur.get(cle)
+        if isinstance(valeur, str) and valeur.strip():
+            return valeur.strip()
+    return None
+
+
+def _selectionnable(moteur: dict[str, Any]) -> bool:
+    if "isSelectable" in moteur:
+        return bool(moteur["isSelectable"])
+    return str(moteur.get("statusWarnLevel", "OK")).upper() != "ERROR"
+
+
+def _analyser_moteurs(
+    recette: Any, type_recette: str, params: dict[str, Any], cible: Optional[str]
+) -> dict[str, Any]:
+    configure = params.get("engineType")
+    resultat: dict[str, Any] = {
+        "moteur_configure": configure.upper() if configure else "AUTO (choix de DSS)",
+    }
+
+    if type_recette in _MOTEUR_RECETTE_CODE:
+        moteur = _MOTEUR_RECETTE_CODE[type_recette]
+        resultat.update(
+            moteur_selectionne=moteur,
+            moteurs_disponibles=[],
+            moteurs_indisponibles=[],
+            note="Recette de code : moteur imposé par le type de recette",
+        )
+        if cible:
+            possible = cible in moteur
+            resultat["bascule"] = {
+                "cible": cible,
+                "possible": possible,
+                "raison": (
+                    "déjà sur ce moteur"
+                    if possible
+                    else "recette de code : changer de moteur = réécrire la "
+                    f"recette (type {type_recette})"
+                ),
+            }
+        return resultat
+
+    statut = recette.get_status()
+    try:
+        moteurs = statut.get_engines_details()
+    except ValueError:
+        moteurs = []
+    try:
+        selectionne = _type_moteur(statut.get_selected_engine_details())
+    except ValueError:
+        selectionne = None
+
+    disponibles, indisponibles = [], []
+    for moteur in moteurs:
+        entree = {
+            "moteur": _type_moteur(moteur),
+            "libelle": moteur.get("label"),
+            "niveau": moteur.get("statusWarnLevel"),
+        }
+        message = _raison(moteur)
+        if _selectionnable(moteur):
+            if message:
+                entree["avertissement"] = message
+            disponibles.append(entree)
+        else:
+            entree["raison"] = message or _SANS_RAISON
+            indisponibles.append(entree)
+
+    resultat.update(
+        moteur_selectionne=selectionne or "aucun moteur viable",
+        moteurs_disponibles=disponibles,
+        moteurs_indisponibles=indisponibles,
+    )
+    if not moteurs:
+        resultat["note"] = "DSS ne propose pas de choix de moteur pour cette recette"
+
+    if cible:
+        resultat["bascule"] = _bascule(cible, selectionne, disponibles, indisponibles)
+    return resultat
+
+
+def _bascule(
+    cible: str,
+    selectionne: Optional[str],
+    disponibles: list[dict[str, Any]],
+    indisponibles: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if selectionne == cible:
+        return {"cible": cible, "possible": True, "raison": "déjà sur ce moteur"}
+    dispo = next((m for m in disponibles if m["moteur"] == cible), None)
+    if dispo:
+        raison = "moteur proposé par DSS pour cette recette"
+        if dispo.get("avertissement"):
+            raison += f" (avertissement : {dispo['avertissement']})"
+        return {"cible": cible, "possible": True, "raison": raison}
+    bloque = next((m for m in indisponibles if m["moteur"] == cible), None)
+    if bloque:
+        return {"cible": cible, "possible": False, "raison": bloque["raison"]}
+    return {
+        "cible": cible,
+        "possible": False,
+        "raison": "moteur non proposé par DSS pour ce type de recette ou "
+        "ces connexions d'entrée/sortie",
+    }
+
+
+def inventaire_moteurs(
+    project_key: str,
+    recipe_name: Optional[str] = None,
+    moteur_cible: Optional[str] = None,
+) -> dict[str, Any]:
+    """Moteurs actuels, disponibles et indisponibles des recettes d'un projet.
+
+    Args:
+        project_key: Le projet
+        recipe_name: Une seule recette (sinon toutes)
+        moteur_cible: Moteur à évaluer, ex. "SPARK" : pour chaque recette,
+            indique si la bascule est possible et sinon pourquoi
+
+    Returns:
+        Détail par recette et synthèse ; rien n'est modifié dans DSS.
+    """
+    cible = moteur_cible.strip().upper() if moteur_cible else None
+
+    try:
+        projet = get_project(project_key)
+        items = [_as_dict(r) for r in projet.list_recipes()]
+    except Exception as e:
+        return error(f"Impossible de lister les recettes de '{project_key}' : {e}")
+
+    if recipe_name:
+        items = [r for r in items if r.get("name") == recipe_name]
+        if not items:
+            return error(
+                f"Recette '{recipe_name}' introuvable dans '{project_key}'",
+                "not_found",
+            )
+
+    recettes, erreurs = [], []
+    for numero, brut in enumerate(items, start=1):
+        nom = brut.get("name")
+        logger.info("Moteurs : recette %d/%d - %s", numero, len(items), nom)
+        try:
+            recette = projet.get_recipe(nom)
+            settings = recette.get_settings()
+            entree = {"recette": nom, "type": settings.type}
+            entree.update(
+                _analyser_moteurs(recette, settings.type, settings.raw_params or {}, cible)
+            )
+            entree["recette_de_code"] = settings.type in CODE_RECIPE_TYPES
+            recettes.append(entree)
+        except Exception as e:
+            erreurs.append({"recette": nom, "erreur": str(e)})
+
+    synthese: dict[str, Any] = {
+        "nb_recettes": len(recettes),
+        "par_moteur_selectionne": dict(
+            Counter(r["moteur_selectionne"] for r in recettes)
+        ),
+        "moteurs_disponibles_au_moins_une_fois": sorted(
+            {m["moteur"] for r in recettes for m in r["moteurs_disponibles"]}
+        ),
+    }
+    if cible:
+        bascules = [r for r in recettes if "bascule" in r]
+        synthese["bascule_vers"] = {
+            "cible": cible,
+            "deja_sur_cible": sum(
+                r["bascule"]["raison"] == "déjà sur ce moteur" for r in bascules
+            ),
+            "possibles": sorted(
+                r["recette"]
+                for r in bascules
+                if r["bascule"]["possible"]
+                and r["bascule"]["raison"] != "déjà sur ce moteur"
+            ),
+            "impossibles": [
+                {"recette": r["recette"], "raison": r["bascule"]["raison"]}
+                for r in bascules
+                if not r["bascule"]["possible"]
+            ],
+        }
+
+    resultat = ok(
+        project_key=project_key,
+        synthese=synthese,
+        recettes=recettes,
+        note=(
+            "Lecture seule : statut calculé par DSS (comme à l'ouverture de "
+            "la recette), aucune modification. 'Possible' signifie que DSS "
+            "propose ce moteur : vérifier ensuite le résultat sur un run de test."
+        ),
+    )
+    if erreurs:
+        resultat["erreurs"] = erreurs
+    return resultat

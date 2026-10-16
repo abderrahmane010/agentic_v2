@@ -199,6 +199,22 @@ def initial_state() -> dict[str, Any]:
                 }
             },
         },
+        "recipe_status": {
+            "join_out": {
+                "selectedEngine": {"type": "DSS", "label": "Local stream"},
+                "engines": [
+                    {"type": "DSS", "label": "Local stream", "isSelectable": True,
+                     "statusWarnLevel": "OK"},
+                    {"type": "SQL", "label": "In-database", "isSelectable": False,
+                     "statusWarnLevel": "ERROR",
+                     "statusMessage": "Inputs and outputs are not in the same database"},
+                    {"type": "SPARK", "label": "Spark", "isSelectable": True,
+                     "statusWarnLevel": "WARN",
+                     "statusMessage": "Input dataset is not a Spark-native format"},
+                ],
+                "allMessagesForFrontend": {},
+            },
+        },
         # State given to the next job started (DONE or FAILED).
         "next_job_state": "DONE",
         "variables": {
@@ -386,6 +402,10 @@ class FakeDSS:
         @self.route("GET", P + r"/recipes/([^/]+)")
         def get_recipe(project, name, params, body):
             return copy.deepcopy(st["recipes"][name])
+
+        @self.route("GET", P + r"/recipes/([^/]+)/status")
+        def recipe_status(project, name, params, body):
+            return copy.deepcopy(st["recipe_status"].get(name, {"allMessagesForFrontend": {}}))
 
         @self.route("PUT", P + r"/recipes/([^/]+)")
         def put_recipe(project, name, params, body):

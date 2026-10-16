@@ -56,6 +56,11 @@ Commandes directes (sans LLM, sortie complète) :
 - `/interfaces [PROJET]` : tables d'un projet utilisées par d'autres projets
   (y compris une table « finale » dans son projet), emplacements écrits par
   plusieurs projets et sources externes partagées
+- `/moteurs PROJET [CIBLE]` : moteur d'exécution de chaque recette (menu
+  « Engine » au-dessus de RUN) : moteur configuré, moteur réellement
+  sélectionné par DSS, moteurs disponibles et indisponibles avec la raison
+  donnée par DSS, et possibilité de passer au moteur CIBLE (ex. `SPARK`).
+  Lecture seule : rien n'est modifié dans DSS
 - `/projets`, `/scenarios PROJET`, `/echecs PROJET`, `/logs PROJET SCENARIO`,
   `/connexions [PROJET]`, `/export PROJET` : voir `/aide` dans le chat
 
@@ -123,7 +128,7 @@ pas en succès, avec son état. Avec `wait=false`, ils renvoient l'identifiant d
 job tout de suite, et `get_job_details` permet ensuite de le suivre. Un champ
 `warnings` signale les données partielles.
 
-## Outils (45)
+## Outils (48)
 
 **Projets** : `list_dss_projects`
 
@@ -131,7 +136,7 @@ job tout de suite, et `get_job_details` permet ensuite de le suivre. Un champ
 `check_dataset_metrics`, `get_dataset_sample`, `create_dataset`*,
 `update_dataset`*, `delete_dataset`*, `build_dataset`*, `clear_dataset`*
 
-**Recettes** : `list_recipes`, `get_recipe_info`, `get_recipe_code`,
+**Recettes** : `list_recipes`, `get_recipe_info`, `inventaire_moteurs`, `get_recipe_code`,
 `validate_recipe_syntax`, `dry_run_recipe`, `get_generated_sql`,
 `create_recipe`*, `update_recipe`*, `delete_recipe`*, `run_recipe`*
 
