@@ -106,3 +106,25 @@ def test_recette_de_plugin(dss):
 def test_recette_code_moteur_impose(dss):
     code = par_recette(moteurs.inventaire_moteurs("PROJ"))["compute_mid"]
     assert code["moteur_configure"] == "imposé par le type de recette"
+
+
+def test_moteur_non_selectionnable_meme_ok_est_indisponible(dss):
+    """Cas réel AEL : HIVE recommandé mais bloqué par le redispatch."""
+    dss.state["recipe_status"]["join_out"] = {
+        "selectedEngine": {"type": "DSS", "variantLabel": "Stream", "isSelectable": True},
+        "engines": [
+            {"type": "DSS", "variantLabel": "Stream", "isSelectable": True,
+             "statusWarnLevel": "OK"},
+            {"type": "HIVE", "isSelectable": False, "recommended": True,
+             "statusWarnLevel": "OK",
+             "notSelectableReason": "Not available with redispatch partitioning"},
+            {"type": "SPARK", "variantLabel": "Spark SQL", "isSelectable": False,
+             "statusWarnLevel": "OK"},
+        ],
+    }
+    join = moteurs.inventaire_moteurs("PROJ", "join_out", "HIVE")["recettes"][0]
+    assert [m["moteur"] for m in join["moteurs_disponibles"]] == ["DSS"]
+    indispo = {m["moteur"]: m for m in join["moteurs_indisponibles"]}
+    assert indispo["HIVE"]["raison"] == "Not available with redispatch partitioning"
+    assert indispo["SPARK"]["raison"].startswith("indisponible")
+    assert join["bascule"]["possible"] is False

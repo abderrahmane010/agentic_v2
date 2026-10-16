@@ -54,10 +54,22 @@ def _type_moteur(moteur: dict[str, Any]) -> str:
 
 
 def _raison(moteur: dict[str, Any]) -> Optional[str]:
-    """Message de DSS expliquant l'état d'un moteur."""
+    """Message de DSS expliquant l'état d'un moteur.
+
+    Selon le cas, DSS le place dans statusMessage ou dans un autre champ
+    (raison de non-sélection) : on prend le premier texte trouvé dans un
+    champ dont le nom évoque un message ou une raison.
+    """
     for cle in ("statusMessage", "message", "reason", "details"):
         valeur = moteur.get(cle)
         if isinstance(valeur, str) and valeur.strip():
+            return valeur.strip()
+    for cle, valeur in moteur.items():
+        if (
+            isinstance(valeur, str)
+            and valeur.strip()
+            and any(mot in cle.lower() for mot in ("message", "reason", "cause", "why"))
+        ):
             return valeur.strip()
     return None
 
@@ -133,12 +145,11 @@ def _analyser_moteurs(
         if moteur.get("recommended"):
             entree["recommande"] = True
         message = _raison(moteur)
-        # isSelectable=False sans erreur : moteur imposé (pas d'autre choix),
-        # pas indisponible. Cas des plugins et des recettes à moteur unique.
-        impose = not moteur.get("isSelectable", True) and (
-            entree["moteur"] == selectionne
-            or str(moteur.get("statusWarnLevel", "")).upper() == "OK"
-        )
+        # Le moteur sélectionné mais non sélectionnable est imposé (aucun
+        # autre choix : plugins, recettes à moteur unique). Tout autre moteur
+        # non sélectionnable est indisponible, même avec statusWarnLevel OK
+        # (ex. "Not available with redispatch partitioning").
+        impose = not moteur.get("isSelectable", True) and entree["moteur"] == selectionne
         if impose:
             entree["impose"] = True
         if _selectionnable(moteur) or impose:

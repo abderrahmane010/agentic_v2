@@ -469,7 +469,9 @@ async def _afficher_moteurs(session: ClientSession, commande: str) -> None:
               f" (configuré : {r['moteur_configure']})")
         print(f"     ✅ disponibles : {dispo}")
         for m in r["moteurs_indisponibles"]:
-            print(f"     ❌ {m['moteur']} : {m['raison']}")
+            variante = f" ({m['variante']})" if m.get("variante") else ""
+            reco = " (recommandé par DSS)" if m.get("recommande") else ""
+            print(f"     ❌ {m['moteur']}{variante}{reco} : {m['raison']}")
         if r.get("transferts_rapides_non_applicables"):
             print(f"     ➖ {len(r['transferts_rapides_non_applicables'])} moteurs de "
                   "transfert rapide (S3_TO_…, …_TO_DATABRICKS) non applicables")
