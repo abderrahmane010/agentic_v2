@@ -85,15 +85,21 @@ def test_recette_de_plugin(dss):
                    "params": {}, "inputs": {}, "outputs": {}, "tags": []},
         "payload": "",
     }
-    dss.state["recipe_status"]["hive_ext"] = {
-        "selectedEngine": {"type": "SPARK"},
-        "engines": [{"type": "SPARK", "statusWarnLevel": "ERROR"}],
-    }
-    r = moteurs.inventaire_moteurs("PROJ", details=True)
+    # Statut réel renvoyé par DSS 14.1.1 pour une recette de plugin (AEL).
+    spark = {"canEngineAppend": True, "isSelectable": False, "label": "Spark",
+             "recommended": False, "statusWarnLevel": "OK", "type": "SPARK",
+             "typeLabel": "Spark", "variant": "PY_SPARK", "variantLabel": "PySpark"}
+    dss.state["recipe_status"]["hive_ext"] = {"engines": [spark], "selectedEngine": spark}
+    r = moteurs.inventaire_moteurs("PROJ", details=True, moteur_cible="SPARK")
     plugin = par_recette(r)["hive_ext"]
     assert plugin["plugin"] == "create-hive-external-table-recipe"
     assert "plugin" in plugin["note"]
-    assert plugin["statut_brut"]["selectedEngine"] == {"type": "SPARK"}
+    assert plugin["moteur_selectionne"] == "SPARK"
+    assert plugin["variante_selectionnee"] == "PySpark"
+    assert plugin["moteurs_indisponibles"] == []
+    assert plugin["moteurs_disponibles"][0]["impose"] is True
+    assert plugin["bascule"]["raison"] == "déjà sur ce moteur"
+    assert plugin["statut_brut"]["selectedEngine"]["variant"] == "PY_SPARK"
     assert r["synthese"]["recettes_plugin"] == ["hive_ext (create-hive-external-table-recipe)"]
 
 

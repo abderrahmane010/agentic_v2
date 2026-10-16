@@ -457,8 +457,15 @@ async def _afficher_moteurs(session: ClientSession, commande: str) -> None:
     if synthese.get("recettes_plugin"):
         print(f"🧩 Recettes de plugin à examiner : {', '.join(synthese['recettes_plugin'])}")
     for r in donnees["recettes"]:
-        dispo = ", ".join(m["moteur"] for m in r["moteurs_disponibles"]) or "-"
-        print(f"\n  ⚙️  {r['recette']} [{r['type']}] : {r['moteur_selectionne']}"
+        dispo = ", ".join(
+            m["moteur"]
+            + (f" ({m['variante']})" if m.get("variante") else "")
+            + (" ⭐ recommandé" if m.get("recommande") else "")
+            + (" — imposé" if m.get("impose") else "")
+            for m in r["moteurs_disponibles"]
+        ) or "-"
+        variante = f" / {r['variante_selectionnee']}" if r.get("variante_selectionnee") else ""
+        print(f"\n  ⚙️  {r['recette']} [{r['type']}] : {r['moteur_selectionne']}{variante}"
               f" (configuré : {r['moteur_configure']})")
         print(f"     ✅ disponibles : {dispo}")
         for m in r["moteurs_indisponibles"]:

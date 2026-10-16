@@ -113,9 +113,10 @@ def _analyser_moteurs(
     except ValueError:
         moteurs = []
     try:
-        selectionne = _type_moteur(statut.get_selected_engine_details())
+        detail_selectionne = statut.get_selected_engine_details()
+        selectionne = _type_moteur(detail_selectionne)
     except ValueError:
-        selectionne = None
+        detail_selectionne, selectionne = {}, None
 
     disponibles, indisponibles, transferts = [], [], []
     for moteur in moteurs:
@@ -127,8 +128,20 @@ def _analyser_moteurs(
             "libelle": moteur.get("label"),
             "niveau": moteur.get("statusWarnLevel"),
         }
+        if moteur.get("variantLabel") or moteur.get("variant"):
+            entree["variante"] = moteur.get("variantLabel") or moteur.get("variant")
+        if moteur.get("recommended"):
+            entree["recommande"] = True
         message = _raison(moteur)
-        if _selectionnable(moteur):
+        # isSelectable=False sans erreur : moteur imposé (pas d'autre choix),
+        # pas indisponible. Cas des plugins et des recettes à moteur unique.
+        impose = not moteur.get("isSelectable", True) and (
+            entree["moteur"] == selectionne
+            or str(moteur.get("statusWarnLevel", "")).upper() == "OK"
+        )
+        if impose:
+            entree["impose"] = True
+        if _selectionnable(moteur) or impose:
             if message:
                 entree["avertissement"] = message
             disponibles.append(entree)
@@ -136,6 +149,9 @@ def _analyser_moteurs(
             entree["raison"] = message or _SANS_RAISON
             indisponibles.append(entree)
 
+    variante = detail_selectionne.get("variantLabel") or detail_selectionne.get("variant")
+    if selectionne and variante:
+        resultat["variante_selectionnee"] = variante
     resultat.update(
         moteur_selectionne=selectionne or "aucun moteur viable",
         moteurs_disponibles=disponibles,
@@ -145,11 +161,13 @@ def _analyser_moteurs(
     if type_recette.startswith("CustomCode_"):
         resultat["plugin"] = type_recette.split("_", 1)[1]
         resultat["note"] = (
-            "Recette de plugin : le moteur est choisi par le plugin, la liste "
-            "de DSS peut être incomplète (voir details=true pour le statut brut)"
+            "Recette de plugin : le moteur est imposé par le plugin ; en changer "
+            "suppose de remplacer le plugin"
         )
     elif not moteurs:
         resultat["note"] = "DSS ne propose pas de choix de moteur pour cette recette"
+    elif disponibles and all(m.get("impose") for m in disponibles):
+        resultat["note"] = "Moteur unique imposé : DSS ne propose pas d'alternative"
 
     if cible:
         resultat["bascule"] = _bascule(cible, selectionne, disponibles, indisponibles)
