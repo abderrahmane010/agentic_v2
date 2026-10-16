@@ -63,7 +63,8 @@ def _create_client() -> dataikuapi.DSSClient:
         dataikuapi.DSSClient: New DSS client instance
     """
     # Get configuration from environment
-    dss_host = os.environ.get("DSS_HOST")
+    # Sans "/" final : dataikuapi ajoute "/dip/publicapi" à l'URL.
+    dss_host = (os.environ.get("DSS_HOST") or "").strip().rstrip("/")
     dss_api_key = os.environ.get("DSS_API_KEY")
     insecure_tls = _insecure_tls()
     
