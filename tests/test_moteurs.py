@@ -25,7 +25,6 @@ def test_moteurs_recette_visuelle(dss):
 
 def test_recette_de_code(dss):
     code = par_recette(moteurs.inventaire_moteurs("PROJ"))["compute_mid"]
-    assert code["moteur_configure"] == "DSS"  # params.engineType du faux DSS
     assert code["moteur_selectionne"].startswith("PYTHON")
     assert code["recette_de_code"] is True
 
@@ -71,3 +70,33 @@ def test_commande_chat(dss, capsys):
     assert "❌ SQL : Inputs and outputs are not in the same database" in sortie
     assert "🟢 vers SPARK" in sortie
     assert "1 possibles, 1 impossibles" in sortie
+
+
+def test_transferts_rapides_regroupes(dss):
+    join = moteurs.inventaire_moteurs("PROJ", "join_out")["recettes"][0]
+    assert join["transferts_rapides_non_applicables"] == ["S3_TO_REDSHIFT", "TDCH"]
+    assert [m["moteur"] for m in join["moteurs_indisponibles"]] == ["SQL"]
+
+
+def test_recette_de_plugin(dss):
+    dss.state["recipes"]["hive_ext"] = {
+        "recipe": {"name": "hive_ext", "projectKey": "PROJ",
+                   "type": "CustomCode_create-hive-external-table-recipe",
+                   "params": {}, "inputs": {}, "outputs": {}, "tags": []},
+        "payload": "",
+    }
+    dss.state["recipe_status"]["hive_ext"] = {
+        "selectedEngine": {"type": "SPARK"},
+        "engines": [{"type": "SPARK", "statusWarnLevel": "ERROR"}],
+    }
+    r = moteurs.inventaire_moteurs("PROJ", details=True)
+    plugin = par_recette(r)["hive_ext"]
+    assert plugin["plugin"] == "create-hive-external-table-recipe"
+    assert "plugin" in plugin["note"]
+    assert plugin["statut_brut"]["selectedEngine"] == {"type": "SPARK"}
+    assert r["synthese"]["recettes_plugin"] == ["hive_ext (create-hive-external-table-recipe)"]
+
+
+def test_recette_code_moteur_impose(dss):
+    code = par_recette(moteurs.inventaire_moteurs("PROJ"))["compute_mid"]
+    assert code["moteur_configure"] == "imposé par le type de recette"

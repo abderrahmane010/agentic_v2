@@ -536,6 +536,7 @@ def inventaire_moteurs(
     project_key: str,
     recipe_name: Optional[str] = None,
     moteur_cible: Optional[str] = None,
+    details: bool = False,
 ) -> Dict[str, Any]:
     """Execution engines of the recipes of a project (the "Engine" menu
     above RUN): configured engine, engine actually selected by DSS,
@@ -548,8 +549,9 @@ def inventaire_moteurs(
         recipe_name: Optional, a single recipe
         moteur_cible: Optional target engine to evaluate (SPARK, HIVE,
             IMPALA, SQL, DSS...)
+        details: Also return the raw engine status from DSS (diagnostic)
     """
-    return moteurs.inventaire_moteurs(project_key, recipe_name, moteur_cible)
+    return moteurs.inventaire_moteurs(project_key, recipe_name, moteur_cible, details)
 
 
 @mcp.tool()

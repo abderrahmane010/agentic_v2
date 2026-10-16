@@ -454,6 +454,8 @@ async def _afficher_moteurs(session: ClientSession, commande: str) -> None:
         f"{m} {n}" for m, n in sorted(synthese["par_moteur_selectionne"].items())
     )
     print(f"\nProjet {morceaux[1]} — {synthese['nb_recettes']} recettes : {repartition}")
+    if synthese.get("recettes_plugin"):
+        print(f"🧩 Recettes de plugin à examiner : {', '.join(synthese['recettes_plugin'])}")
     for r in donnees["recettes"]:
         dispo = ", ".join(m["moteur"] for m in r["moteurs_disponibles"]) or "-"
         print(f"\n  ⚙️  {r['recette']} [{r['type']}] : {r['moteur_selectionne']}"
@@ -461,6 +463,11 @@ async def _afficher_moteurs(session: ClientSession, commande: str) -> None:
         print(f"     ✅ disponibles : {dispo}")
         for m in r["moteurs_indisponibles"]:
             print(f"     ❌ {m['moteur']} : {m['raison']}")
+        if r.get("transferts_rapides_non_applicables"):
+            print(f"     ➖ {len(r['transferts_rapides_non_applicables'])} moteurs de "
+                  "transfert rapide (S3_TO_…, …_TO_DATABRICKS) non applicables")
+        if r.get("plugin"):
+            print(f"     🧩 plugin : {r['plugin']}")
         if r.get("note"):
             print(f"     ℹ️  {r['note']}")
         if r.get("bascule"):
