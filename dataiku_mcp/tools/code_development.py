@@ -9,7 +9,13 @@ from itertools import islice
 from typing import Any, Dict, List, Optional
 
 from dataiku_mcp.client import get_project
-from dataiku_mcp.tools._common import CODE_RECIPE_TYPES, error, flat_refs, ok
+from dataiku_mcp.tools._common import (
+    CODE_RECIPE_TYPES,
+    error,
+    flat_refs,
+    ok,
+    recipe_payload,
+)
 
 SQL_RECIPE_TYPES = ("sql_script", "sql_query", "spark_sql_query")
 PYTHON_RECIPE_TYPES = ("python", "pyspark", "cpython")
@@ -72,7 +78,7 @@ def get_recipe_code(project_key: str, recipe_name: str) -> Dict[str, Any]:
         else:
             # Visual recipe: the "code" is its JSON configuration.
             code = json.dumps(
-                {"params": settings.raw_params, "payload": settings.obj_payload},
+                {"params": settings.raw_params, "payload": recipe_payload(settings)},
                 indent=2,
                 ensure_ascii=False,
             )

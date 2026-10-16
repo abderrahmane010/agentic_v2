@@ -62,3 +62,24 @@ def test_classer_datasets_flow_tool(dss):
 def test_project_resource(dss):
     contents = asyncio.run(server.mcp.read_resource("dss://project/PROJ"))
     assert json.loads(contents[0].content)["name"] == "My project"
+
+
+def test_dss_host_slash_final(monkeypatch):
+    import dataikuapi
+
+    from dataiku_mcp import client
+
+    vus = {}
+
+    class Client:
+        def __init__(self, host, key, **kwargs):
+            vus["host"] = host
+
+        def get_instance_info(self):
+            return None
+
+    monkeypatch.setattr(dataikuapi, "DSSClient", Client)
+    monkeypatch.setenv("DSS_HOST", " https://dss.test/ ")
+    monkeypatch.setenv("DSS_API_KEY", "k")
+    client._create_client()
+    assert vus["host"] == "https://dss.test"

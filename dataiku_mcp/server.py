@@ -25,7 +25,10 @@ from dataiku_mcp.tools import (
     classification_dataset as flow_classification,
     code_development,
     datasets,
+    dependances_projets,
+    moteurs,
     environment_config,
+    inventaire_migration,
     monitoring_debug,
     productivity,
     project_exploration,
@@ -119,7 +122,7 @@ def create_recipe(
         project_key, recipe_type, recipe_name, inputs, outputs, code
     )
 
- 
+
 @mcp.tool()
 @outil_securise(ecriture=True)
 def update_recipe(
@@ -137,7 +140,7 @@ def update_recipe(
     """
     return recipes.update_recipe(project_key, recipe_name, **settings)
 
- 
+
 @mcp.tool()
 @outil_securise(ecriture=True)
 def delete_recipe(project_key: str, recipe_name: str) -> Dict[str, Any]:
@@ -149,7 +152,7 @@ def delete_recipe(project_key: str, recipe_name: str) -> Dict[str, Any]:
     """
     return recipes.delete_recipe(project_key, recipe_name)
 
- 
+
 @mcp.tool()
 @outil_securise(ecriture=True)
 def run_recipe(
@@ -218,7 +221,7 @@ def create_dataset(
     """
     return datasets.create_dataset(project_key, dataset_name, dataset_type, params)
 
- 
+
 @mcp.tool()
 @outil_securise(ecriture=True)
 def update_dataset(
@@ -235,7 +238,7 @@ def update_dataset(
     """
     return datasets.update_dataset(project_key, dataset_name, **settings)
 
- 
+
 @mcp.tool()
 @outil_securise(ecriture=True)
 def delete_dataset(
@@ -252,7 +255,7 @@ def delete_dataset(
     """
     return datasets.delete_dataset(project_key, dataset_name, drop_data)
 
- 
+
 @mcp.tool()
 @outil_securise(ecriture=True)
 def build_dataset(
@@ -292,7 +295,7 @@ def clear_dataset(
     """
     return datasets.clear_dataset(project_key, dataset_name, partition)
 
- 
+
 @mcp.tool()
 @outil_securise()
 def inspect_dataset_schema(project_key: str, dataset_name: str) -> Dict[str, Any]:
@@ -304,7 +307,7 @@ def inspect_dataset_schema(project_key: str, dataset_name: str) -> Dict[str, Any
     """
     return datasets.inspect_dataset_schema(project_key, dataset_name)
 
- 
+
 @mcp.tool()
 @outil_securise()
 def check_dataset_metrics(project_key: str, dataset_name: str) -> Dict[str, Any]:
@@ -316,7 +319,7 @@ def check_dataset_metrics(project_key: str, dataset_name: str) -> Dict[str, Any]
     """
     return datasets.check_dataset_metrics(project_key, dataset_name)
 
- 
+
 # ===========================================================================
 # Scenario tools
 # ===========================================================================
@@ -384,7 +387,7 @@ def create_scenario(
         project_key, scenario_name, scenario_type, definition
     )
 
- 
+
 @mcp.tool()
 @outil_securise(ecriture=True)
 def update_scenario(
@@ -402,7 +405,7 @@ def update_scenario(
     """
     return scenarios.update_scenario(project_key, scenario_id, **settings)
 
- 
+
 @mcp.tool()
 @outil_securise(ecriture=True)
 def delete_scenario(project_key: str, scenario_id: str) -> Dict[str, Any]:
@@ -414,7 +417,7 @@ def delete_scenario(project_key: str, scenario_id: str) -> Dict[str, Any]:
     """
     return scenarios.delete_scenario(project_key, scenario_id)
 
- 
+
 @mcp.tool()
 @outil_securise(ecriture=True)
 def add_scenario_trigger(
@@ -437,7 +440,7 @@ def add_scenario_trigger(
         project_key, scenario_id, trigger_type, **(params or {})
     )
 
- 
+
 @mcp.tool()
 @outil_securise(ecriture=True)
 def remove_scenario_trigger(
@@ -454,7 +457,7 @@ def remove_scenario_trigger(
     """
     return scenarios.remove_scenario_trigger(project_key, scenario_id, trigger_idx)
 
- 
+
 @mcp.tool()
 @outil_securise(ecriture=True)
 def run_scenario(
@@ -489,7 +492,7 @@ def get_scenario_logs(
         project_key, scenario_id, run_id, max_chars
     )
 
- 
+
 @mcp.tool()
 @outil_securise()
 def get_scenario_steps(project_key: str, scenario_id: str) -> Dict[str, Any]:
@@ -501,7 +504,7 @@ def get_scenario_steps(project_key: str, scenario_id: str) -> Dict[str, Any]:
     """
     return advanced_scenarios.get_scenario_steps(project_key, scenario_id)
 
- 
+
 @mcp.tool()
 @outil_securise(ecriture=True)
 def clone_scenario(
@@ -523,10 +526,34 @@ def clone_scenario(
         project_key, source_scenario_id, new_scenario_name, modifications
     )
 
- 
+
 # ===========================================================================
 # Code development tools
 # ===========================================================================
+@mcp.tool()
+@outil_securise()
+def inventaire_moteurs(
+    project_key: str,
+    recipe_name: Optional[str] = None,
+    moteur_cible: Optional[str] = None,
+    details: bool = False,
+) -> Dict[str, Any]:
+    """Execution engines of the recipes of a project (the "Engine" menu
+    above RUN): configured engine, engine actually selected by DSS,
+    available and unavailable engines with DSS's reason, and whether each
+    recipe can switch to a target engine (e.g. moteur_cible="SPARK").
+    Read-only: nothing is changed in DSS.
+
+    Args:
+        project_key: The project key
+        recipe_name: Optional, a single recipe
+        moteur_cible: Optional target engine to evaluate (SPARK, HIVE,
+            IMPALA, SQL, DSS...)
+        details: Also return the raw engine status from DSS (diagnostic)
+    """
+    return moteurs.inventaire_moteurs(project_key, recipe_name, moteur_cible, details)
+
+
 @mcp.tool()
 @outil_securise()
 def get_recipe_code(project_key: str, recipe_name: str) -> Dict[str, Any]:
@@ -538,7 +565,7 @@ def get_recipe_code(project_key: str, recipe_name: str) -> Dict[str, Any]:
     """
     return code_development.get_recipe_code(project_key, recipe_name)
 
- 
+
 @mcp.tool()
 @outil_securise()
 def validate_recipe_syntax(
@@ -555,7 +582,7 @@ def validate_recipe_syntax(
     """
     return code_development.validate_recipe_syntax(project_key, recipe_name, code)
 
- 
+
 @mcp.tool()
 @outil_securise()
 def dry_run_recipe(
@@ -572,7 +599,7 @@ def dry_run_recipe(
     """
     return code_development.test_recipe_dry_run(project_key, recipe_name, sample_rows)
 
- 
+
 @mcp.tool()
 @outil_securise()
 def get_generated_sql(
@@ -592,7 +619,7 @@ def get_generated_sql(
     """
     return code_development.get_generated_sql(project_key, recipe_name, partition)
 
- 
+
 # ===========================================================================
 # Project exploration tools
 # ===========================================================================
@@ -606,12 +633,16 @@ def get_project_flow(project_key: str) -> Dict[str, Any]:
     """
     return project_exploration.get_project_flow(project_key)
 
- 
+
 @mcp.tool()
 @outil_securise()
-def classer_datasets_flow(project_key: str) -> Dict[str, Any]:
-    """Classify the project's datasets by their position in the Flow:
-    sources, intermediates, finals and isolated datasets.
+def classer_datasets_flow(
+    project_key: str,
+    details: bool = False,
+) -> Dict[str, Any]:
+    """List ALL datasets (tables) of a project classified by their position
+    in the Flow: sources, intermediates, finals and isolated datasets.
+    Use this by default when asked for the datasets / tables of a project.
 
     Classification is topological (based on recipe dependencies),
     not necessarily business meaning. Managed folders, models and datasets
@@ -619,13 +650,17 @@ def classer_datasets_flow(project_key: str) -> Dict[str, Any]:
 
     Args:
         project_key: The project key
+        details: Also return producing/consuming recipes for each dataset
     """
     try:
-        return {"status": "ok", **flow_classification.classer_datasets_flow(project_key)}
+        return {
+            "status": "ok",
+            **flow_classification.classer_datasets_flow(project_key, details),
+        }
     except Exception as exc:
         return {"status": "error", "error_type": "dss_error", "message": str(exc)}
 
- 
+
 @mcp.tool()
 @outil_securise()
 def search_project_objects(
@@ -633,18 +668,19 @@ def search_project_objects(
     search_term: str,
     object_types: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Search for datasets, recipes, scenarios by name/pattern.
+    """Search datasets, recipes, scenarios whose name contains a term.
+    To list everything, prefer list_datasets / list_recipes / list_scenarios.
 
     Args:
         project_key: The project key
-        search_term: Search pattern
-        object_types: List of object types to search
+        search_term: Text or pattern to search (e.g. 'client', '*client*')
+        object_types: Subset of ["datasets", "recipes", "scenarios"]
     """
     return project_exploration.search_project_objects(
         project_key, search_term, object_types
     )
 
- 
+
 @mcp.tool()
 @outil_securise()
 def get_dataset_sample(
@@ -667,7 +703,58 @@ def get_dataset_sample(
         project_key, dataset_name, rows, columns
     )
 
- 
+
+@mcp.tool()
+@outil_securise()
+def dependances_inter_projets(
+    project_key: Optional[str] = None,
+    inclure_scenarios: bool = True,
+    details: bool = False,
+    analyser_code: bool = True,
+) -> Dict[str, Any]:
+    """Dependencies BETWEEN Dataiku projects (which project uses data of
+    which other project), cycles, proposed migration waves and interface
+    tables (datasets of a project used by other projects, e.g. a table that
+    is final in its project but the source of another one).
+    Links come from recipes, scenarios, shared physical storage (same
+    table / path) and recipe code. Use it to plan a migration.
+
+    Args:
+        project_key: Optional. Focus on one project (its providers,
+            consumers, prerequisites, wave and interface tables). Omit for
+            the whole instance.
+        inclure_scenarios: Also analyse scenarios (slower)
+        details: Return every object of each link and unused shares
+        analyser_code: Also search recipe code for references to other
+            projects (one API call per code recipe)
+    """
+    return dependances_projets.dependances_inter_projets(
+        project_key, inclure_scenarios, details, analyser_code
+    )
+
+
+@mcp.tool()
+@outil_securise()
+def inventaire_technique_migration(
+    project_key: Optional[str] = None,
+    analyser_code: bool = True,
+    details: bool = False,
+) -> Dict[str, Any]:
+    """Technical inventory before a Cloudera -> Databricks migration:
+    storage (HDFS/Hive...), recipe engines (Hive, Impala, Spark...),
+    Cloudera-specific code (hdfs://, Kerberos, Hive SQL...), plugins and a
+    complexity score (Simple / Moyen / Complexe) with reasons.
+
+    Args:
+        project_key: Optional. One project; omit for a summary of all projects
+        analyser_code: Scan recipe and scenario code (slower)
+        details: Return the per-dataset / per-recipe detail
+    """
+    return inventaire_migration.inventaire_technique_migration(
+        project_key, analyser_code, details
+    )
+
+
 # ===========================================================================
 # Environment configuration tools
 # ===========================================================================
@@ -681,7 +768,7 @@ def get_code_environments(project_key: Optional[str] = None) -> Dict[str, Any]:
     """
     return environment_config.get_code_environments(project_key)
 
- 
+
 @mcp.tool()
 @outil_securise()
 def get_project_variables(project_key: str) -> Dict[str, Any]:
@@ -692,7 +779,7 @@ def get_project_variables(project_key: str) -> Dict[str, Any]:
     """
     return environment_config.get_project_variables(project_key)
 
- 
+
 @mcp.tool()
 @outil_securise()
 def get_connections(project_key: Optional[str] = None) -> Dict[str, Any]:
@@ -703,7 +790,7 @@ def get_connections(project_key: Optional[str] = None) -> Dict[str, Any]:
     """
     return environment_config.get_connections(project_key)
 
- 
+
 # ===========================================================================
 # Monitoring and debug tools
 # ===========================================================================
@@ -723,7 +810,7 @@ def get_recent_runs(
     """
     return monitoring_debug.get_recent_runs(project_key, limit, status_filter)
 
- 
+
 @mcp.tool()
 @outil_securise()
 def get_job_details(
@@ -738,7 +825,7 @@ def get_job_details(
     """
     return monitoring_debug.get_job_details(project_key, job_id, max_log_chars)
 
- 
+
 @mcp.tool()
 @outil_securise(ecriture=True)
 def cancel_running_jobs(project_key: str, job_ids: List[str]) -> Dict[str, Any]:
@@ -750,7 +837,7 @@ def cancel_running_jobs(project_key: str, job_ids: List[str]) -> Dict[str, Any]:
     """
     return monitoring_debug.cancel_running_jobs(project_key, job_ids)
 
- 
+
 # ===========================================================================
 # Productivity tools
 # ===========================================================================
@@ -786,7 +873,7 @@ def duplicate_project_structure(
         dry_run,
     )
 
- 
+
 @mcp.tool()
 @outil_securise()
 def export_project_config(
@@ -801,7 +888,7 @@ def export_project_config(
     """
     return productivity.export_project_config(project_key, export_format)
 
- 
+
 @mcp.tool()
 @outil_securise(ecriture=True)
 def batch_update_objects(
@@ -825,7 +912,7 @@ def batch_update_objects(
         project_key, object_type, pattern, updates, dry_run
     )
 
- 
+
 # ===========================================================================
 # Resources
 # ===========================================================================
@@ -837,7 +924,7 @@ def list_available_projects() -> str:
         ensure_ascii=False,
     )
 
- 
+
 @mcp.resource("dss://project/{project_key}")
 def get_project_info(project_key: str) -> str:
     """Get basic information about a specific project."""
@@ -857,9 +944,15 @@ def get_project_info(project_key: str) -> str:
         logger.warning("get_project_info(%s) : %s", project_key, exc)
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
- 
+
 def create_server() -> FastMCP:
     """Create and configure the MCP server."""
+    if mode_lecture_seule():
+        # Inutile d'exposer au LLM des outils qui seraient refusés.
+        for outil in mcp._tool_manager.list_tools():
+            if getattr(outil.fn, "outil_ecriture", False):
+                mcp._tool_manager.remove_tool(outil.name)
+
     autorises = projets_autorises()
     logger.info(
         "Serveur prêt - lecture seule : %s - projets autorisés : %s",
@@ -868,6 +961,6 @@ def create_server() -> FastMCP:
     )
     return mcp
 
- 
+
 if __name__ == "__main__":
     create_server().run()

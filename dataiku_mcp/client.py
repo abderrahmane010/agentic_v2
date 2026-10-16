@@ -2,13 +2,36 @@
 Dataiku DSS client wrapper for MCP integration.
 """
 
+import logging
 import os
+import warnings
 from typing import Optional
+
 import dataikuapi
+import urllib3
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
+
+
+def _insecure_tls() -> bool:
+    """TLS verification is on unless DSS_INSECURE_TLS is true (self-signed certs)."""
+    return os.environ.get("DSS_INSECURE_TLS", "false").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+if _insecure_tls():
+    # Vérification TLS désactivée volontairement : on masque l'avertissement
+    # répété à chaque requête. Fait au chargement du module : le serveur MCP
+    # restaure les filtres d'avertissements après chaque requête
+    # (warnings.catch_warnings).
+    warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
 
 _CLIENT_INSTANCE: Optional[dataikuapi.DSSClient] = None
 
@@ -40,14 +63,10 @@ def _create_client() -> dataikuapi.DSSClient:
         dataikuapi.DSSClient: New DSS client instance
     """
     # Get configuration from environment
-    dss_host = os.environ.get("DSS_HOST")
+    # Sans "/" final : dataikuapi ajoute "/dip/publicapi" à l'URL.
+    dss_host = (os.environ.get("DSS_HOST") or "").strip().rstrip("/")
     dss_api_key = os.environ.get("DSS_API_KEY")
-    # TLS verification is on unless explicitly disabled (self-signed certs).
-    insecure_tls = os.environ.get("DSS_INSECURE_TLS", "false").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    )
+    insecure_tls = _insecure_tls()
     
     if not dss_host:
         raise ValueError("DSS_HOST environment variable is required")
@@ -55,6 +74,11 @@ def _create_client() -> dataikuapi.DSSClient:
     if not dss_api_key:
         raise ValueError("DSS_API_KEY environment variable is required")
     
+    if insecure_tls:
+        logger.warning(
+            "DSS_INSECURE_TLS=true : certificat TLS de %s non vérifié", dss_host
+        )
+
     try:
         client = dataikuapi.DSSClient(
             dss_host,

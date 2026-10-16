@@ -36,6 +36,52 @@ claude mcp add dataiku-dss \
     -- uv run --directory /chemin/vers/agentic_v2 python scripts/mcp_server.py
 ```
 
+## Chat avec votre propre LLM (vLLM / API compatible OpenAI)
+
+Renseigner `VLLM_BASE_URL`, `VLLM_MODEL` et `OPENAI_API_KEY` dans `.env`, puis :
+
+```bash
+python scripts/chat_llm.py                       # chat interactif
+python scripts/chat_llm.py -q "Liste les datasets finaux du projet MON_PROJET"
+```
+
+Commandes directes (sans LLM, sortie complète) :
+
+- `/tables PROJET` : datasets classés en source / intermédiaire / final
+- `/dependances` : dépendances entre tous les projets, cycles et vagues de
+  migration proposées ; écrit un rapport Markdown avec graphe Mermaid dans
+  `rapports/`
+- `/dependances PROJET` : fournisseurs, consommateurs et prérequis de migration
+  d'un projet
+- `/interfaces [PROJET]` : tables d'un projet utilisées par d'autres projets
+  (y compris une table « finale » dans son projet), emplacements écrits par
+  plusieurs projets et sources externes partagées
+- `/moteurs PROJET [CIBLE]` : moteur d'exécution de chaque recette (menu
+  « Engine » au-dessus de RUN) : moteur configuré, moteur réellement
+  sélectionné par DSS, moteurs disponibles et indisponibles avec la raison
+  donnée par DSS, et possibilité de passer au moteur CIBLE (ex. `SPARK`).
+  Lecture seule : rien n'est modifié dans DSS
+- `/projets`, `/scenarios PROJET`, `/echecs PROJET`, `/logs PROJET SCENARIO`,
+  `/connexions [PROJET]`, `/export PROJET` : voir `/aide` dans le chat
+
+Les dépendances entre projets sont détectées via les entrées des recettes,
+les scénarios, le **stockage physique partagé** (deux datasets sur la même
+table ou le même chemin, dont l'un est écrit par un projet) et le **code des
+recettes** (`dataiku.Dataset("PROJET.nom")`, tables SQL `schema.table` et
+chemins HDFS écrits par un autre projet). Ces liens comptent dans le calcul
+des vagues. Les noms construits dynamiquement dans le code et les
+consommateurs hors DSS (BI, exports) ne sont pas détectés.
+- `/migration PROJET` : inventaire technique avant migration Databricks
+  (stockage HDFS/Hive, moteurs des recettes, code spécifique Cloudera, plugins,
+  score de complexité) ; écrit un rapport Markdown et des CSV dans `rapports/`
+- `/migration` : le même résumé pour tous les projets, trié par complexité
+
+Le chat démarre le serveur MCP, donne ses outils au LLM et exécute les appels
+d'outils demandés. Par défaut seuls les outils en lecture sont exposés
+(`CHAT_READ_ONLY=true`). Le serveur vLLM doit être lancé avec
+`--enable-auto-tool-choice --tool-call-parser hermes` (Qwen) pour l'appel
+d'outils.
+
 ## Configuration (`.env`)
 
 | Variable | Défaut | Rôle |
@@ -46,6 +92,10 @@ claude mcp add dataiku-dss \
 | `DSS_READ_ONLY` | `false` (`true` dans `.env.sample`) | Bloque tous les outils qui modifient DSS |
 | `DSS_ALLOWED_PROJECTS` | vide = tous | Liste blanche de clés projet, séparées par des virgules |
 | `DSS_PROJECT_KEY` | - | Projet par défaut des scripts |
+| `VLLM_BASE_URL`, `VLLM_MODEL`, `OPENAI_API_KEY` | - | LLM utilisé par `scripts/chat_llm.py` |
+| `VLLM_INSECURE_TLS`, `VLLM_CA_BUNDLE` | `false`, vide | TLS du serveur LLM (certificat d'entreprise) |
+| `CHAT_READ_ONLY` | `true` | Le chat n'expose que les outils en lecture |
+| `CHAT_MAX_RESULT_CHARS` | `40000` | Taille max d'un résultat d'outil envoyé au LLM |
 
 ## Sécurité
 
@@ -78,7 +128,7 @@ pas en succès, avec son état. Avec `wait=false`, ils renvoient l'identifiant d
 job tout de suite, et `get_job_details` permet ensuite de le suivre. Un champ
 `warnings` signale les données partielles.
 
-## Outils (45)
+## Outils (48)
 
 **Projets** : `list_dss_projects`
 
@@ -86,7 +136,7 @@ job tout de suite, et `get_job_details` permet ensuite de le suivre. Un champ
 `check_dataset_metrics`, `get_dataset_sample`, `create_dataset`*,
 `update_dataset`*, `delete_dataset`*, `build_dataset`*, `clear_dataset`*
 
-**Recettes** : `list_recipes`, `get_recipe_info`, `get_recipe_code`,
+**Recettes** : `list_recipes`, `get_recipe_info`, `inventaire_moteurs`, `get_recipe_code`,
 `validate_recipe_syntax`, `dry_run_recipe`, `get_generated_sql`,
 `create_recipe`*, `update_recipe`*, `delete_recipe`*, `run_recipe`*
 
@@ -125,6 +175,7 @@ Les types de recettes sont ceux de DSS : `python`, `pyspark`, `r`,
 | `scripts/mcp_server.py` | Point d'entrée du serveur (`--transport stdio\|sse`) |
 | `scripts/smoke_test.py` | Appelle chaque outil de lecture sur un vrai projet et affiche OK / ERREUR |
 | `scripts/classer_datasets.py` | Classification topologique des datasets d'un projet |
+| `scripts/chat_llm.py` | Chat en terminal avec un LLM compatible OpenAI (vLLM) utilisant les outils MCP |
 | `scripts/list_databricks_scenario_projects.py` | Projets avec un dataset Databricks déclencheur d'un scénario actif |
 
 ## Développement

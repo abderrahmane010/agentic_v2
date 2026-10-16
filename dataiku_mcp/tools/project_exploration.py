@@ -70,6 +70,48 @@ def get_project_flow(project_key: str) -> Dict[str, Any]:
     return result
 
 
+_TOUS_TYPES = ["datasets", "recipes", "scenarios"]
+
+
+def _normaliser_types(object_types: Optional[List[str]]) -> List[str]:
+    """Accepte 'dataset', 'Datasets', 'recipe', 'all'... (tolérant aux LLM)."""
+    if not object_types:
+        return list(_TOUS_TYPES)
+
+    types = []
+    for brut in object_types:
+        t = str(brut).strip().lower()
+        if t in ("all", "*", "tous", "tout"):
+            return list(_TOUS_TYPES)
+        if not t.endswith("s"):
+            t += "s"
+        if t in _TOUS_TYPES and t not in types:
+            types.append(t)
+    return types or list(_TOUS_TYPES)
+
+
+def _compiler_motif(search_term: str) -> "re.Pattern[str]":
+    """Compile le terme de recherche.
+
+    - vide, '*', '.*', 'all' : tout correspond ;
+    - joker style glob ('*table*', 'client?') : converti en regex ;
+    - sinon regex, ou recherche littérale si la regex est invalide.
+    """
+    if search_term in ("", "*", ".*", "all", "tous"):
+        return re.compile("")
+
+    if ("*" in search_term or "?" in search_term) and not re.search(
+        r"[\\\[\](){}+^$|.]", search_term
+    ):
+        motif = re.escape(search_term).replace(r"\*", ".*").replace(r"\?", ".")
+        return re.compile(motif, re.IGNORECASE)
+
+    try:
+        return re.compile(search_term, re.IGNORECASE)
+    except re.error:
+        return re.compile(re.escape(search_term), re.IGNORECASE)
+
+
 def search_project_objects(
     project_key: str,
     search_term: str,
@@ -89,15 +131,9 @@ def search_project_objects(
     try:
         project = get_project(project_key)
         
-        if object_types is None:
-            object_types = ["datasets", "recipes", "scenarios"]
-        
-        # Compile regex pattern
-        try:
-            pattern = re.compile(search_term, re.IGNORECASE)
-        except re.error:
-            # If regex fails, use simple string matching
-            pattern = None
+        object_types = _normaliser_types(object_types)
+        search_term = (search_term or "").strip()
+        pattern = _compiler_motif(search_term)
         
         search_results = {}
         
