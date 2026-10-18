@@ -157,3 +157,22 @@ def test_erreur_prime_sur_is_selectable(dss):
         "cible": "SPARK", "possible": False,
         "raison": "Not available with redispatch partitioning",
     }
+
+
+def test_commande_chat_une_recette(dss, capsys):
+    from scripts import chat_llm
+    from tests.test_chat_llm import SessionEnMemoire
+
+    session = SessionEnMemoire()
+    asyncio.run(chat_llm.COMMANDES["/moteurs"](session, "/moteurs PROJ join_out spark"))
+    sortie = capsys.readouterr().out
+    assert "Projet PROJ — recette join_out" in sortie
+    assert "compute_mid" not in sortie
+    assert "🟢 vers SPARK" in sortie
+
+    asyncio.run(chat_llm.COMMANDES["/moteurs"](session, "/moteurs PROJ join_out"))
+    sortie = capsys.readouterr().out
+    assert "join_out" in sortie and "vers" not in sortie
+
+    asyncio.run(chat_llm.COMMANDES["/moteurs"](session, "/moteurs PROJ inconnue"))
+    assert "introuvable" in capsys.readouterr().out
