@@ -442,15 +442,18 @@ MOTEURS_CONNUS = {"DSS", "SPARK", "HIVE", "IMPALA", "SQL", "PIG", "PYTHON", "R"}
 async def _afficher_moteurs(session: ClientSession, commande: str) -> None:
     """Commande /moteurs PROJET [RECETTE] [CIBLE] : moteurs des recettes."""
     morceaux = commande.split()
-    if len(morceaux) < 2 or len(morceaux) > 4:
-        print("Usage : /moteurs PROJET [RECETTE] [MOTEUR_CIBLE]\n"
-              "  ex. /moteurs AEL            toutes les recettes\n"
-              "      /moteurs AEL SPARK      toutes, bascule vers SPARK\n"
-              "      /moteurs AEL ma_recette SPARK")
+    if len(morceaux) < 2 or len(morceaux) > 5:
+        print("Usage : /moteurs PROJET [RECETTE] [MOTEUR_CIBLE] [tout]\n"
+              "  ex. /moteurs AEL            recettes visuelles\n"
+              "      /moteurs AEL SPARK      recettes visuelles, bascule vers SPARK\n"
+              "      /moteurs AEL ma_recette SPARK\n"
+              "      /moteurs AEL tout       aussi les recettes de code et de plugin")
         return
     arguments: dict[str, Any] = {"project_key": morceaux[1]}
     for mot in morceaux[2:]:
-        if mot.upper() in MOTEURS_CONNUS:
+        if mot.lower() in ("tout", "--tout", "all"):
+            arguments["inclure_code"] = True
+        elif mot.upper() in MOTEURS_CONNUS:
             arguments["moteur_cible"] = mot
         else:
             arguments["recipe_name"] = mot
@@ -463,8 +466,12 @@ async def _afficher_moteurs(session: ClientSession, commande: str) -> None:
     repartition = ", ".join(
         f"{m} {n}" for m, n in sorted(synthese["par_moteur_selectionne"].items())
     )
-    portee = (f"recette {arguments['recipe_name']}" if "recipe_name" in arguments
-              else f"{synthese['nb_recettes']} recettes")
+    if "recipe_name" in arguments:
+        portee = f"recette {arguments['recipe_name']}"
+    elif arguments.get("inclure_code"):
+        portee = f"{synthese['nb_recettes']} recettes"
+    else:
+        portee = f"{synthese['nb_recettes']} recettes visuelles"
     print(f"\nProjet {morceaux[1]} — {portee} : {repartition}")
     if synthese.get("recettes_plugin"):
         print(f"🧩 Recettes de plugin à examiner : {', '.join(synthese['recettes_plugin'])}")
@@ -495,6 +502,10 @@ async def _afficher_moteurs(session: ClientSession, commande: str) -> None:
             b = r["bascule"]
             print(f"     {'🟢' if b['possible'] else '🔴'} vers {b['cible']} : {b['raison']}")
 
+    ignorees = synthese.get("recettes_code_ou_plugin_ignorees") or []
+    if ignorees:
+        print(f"\nℹ️  {len(ignorees)} recette(s) de code/plugin non affichées "
+              "(moteur imposé) : ajouter « tout » pour les voir")
     bascule = synthese.get("bascule_vers")
     if bascule:
         print(f"\n📊 Bascule vers {bascule['cible']} : {bascule['deja_sur_cible']} déjà, "
@@ -586,10 +597,10 @@ AIDE = """Commandes directes (sans LLM, sortie complète) :
   /export PROJET                 configuration complète du projet -> rapports/
   /dependances [PROJET]          dépendances inter-projets et vagues de migration
   /interfaces [PROJET]           tables d'un projet utilisées par d'autres projets
-  /moteurs PROJET [RECETTE] [CIBLE]
-                                 moteurs des recettes (actuel, disponibles,
-                                 bascule possible vers CIBLE, ex. SPARK) ;
-                                 RECETTE limite à une seule recette
+  /moteurs PROJET [RECETTE] [CIBLE] [tout]
+                                 moteurs des recettes visuelles (actuel,
+                                 disponibles, bascule vers CIBLE, ex. SPARK) ;
+                                 RECETTE : une seule ; tout : + code/plugin
   /migration [PROJET]            inventaire technique avant migration Databricks
   /outils                        outils disponibles pour le LLM
   /aide                          cette aide

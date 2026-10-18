@@ -24,13 +24,13 @@ def test_moteurs_recette_visuelle(dss):
 
 
 def test_recette_de_code(dss):
-    code = par_recette(moteurs.inventaire_moteurs("PROJ"))["compute_mid"]
+    code = par_recette(moteurs.inventaire_moteurs("PROJ", inclure_code=True))["compute_mid"]
     assert code["moteur_selectionne"].startswith("PYTHON")
     assert code["recette_de_code"] is True
 
 
 def test_bascule_vers_spark(dss):
-    r = moteurs.inventaire_moteurs("PROJ", moteur_cible="spark")
+    r = moteurs.inventaire_moteurs("PROJ", moteur_cible="spark", inclure_code=True)
     recettes = par_recette(r)
     assert recettes["join_out"]["bascule"]["possible"] is True
     assert "avertissement" in recettes["join_out"]["bascule"]["raison"]
@@ -64,7 +64,7 @@ def test_commande_chat(dss, capsys):
     from scripts import chat_llm
     from tests.test_chat_llm import SessionEnMemoire
 
-    asyncio.run(chat_llm.COMMANDES["/moteurs"](SessionEnMemoire(), "/moteurs PROJ SPARK"))
+    asyncio.run(chat_llm.COMMANDES["/moteurs"](SessionEnMemoire(), "/moteurs PROJ SPARK tout"))
     sortie = capsys.readouterr().out
     assert "join_out [join] : DSS (configuré : AUTO (choix de DSS))" in sortie
     assert "❌ SQL : Inputs and outputs are not in the same database" in sortie
@@ -90,7 +90,7 @@ def test_recette_de_plugin(dss):
              "recommended": False, "statusWarnLevel": "OK", "type": "SPARK",
              "typeLabel": "Spark", "variant": "PY_SPARK", "variantLabel": "PySpark"}
     dss.state["recipe_status"]["hive_ext"] = {"engines": [spark], "selectedEngine": spark}
-    r = moteurs.inventaire_moteurs("PROJ", details=True, moteur_cible="SPARK")
+    r = moteurs.inventaire_moteurs("PROJ", details=True, moteur_cible="SPARK", inclure_code=True)
     plugin = par_recette(r)["hive_ext"]
     assert plugin["plugin"] == "create-hive-external-table-recipe"
     assert "plugin" in plugin["note"]
@@ -104,7 +104,7 @@ def test_recette_de_plugin(dss):
 
 
 def test_recette_code_moteur_impose(dss):
-    code = par_recette(moteurs.inventaire_moteurs("PROJ"))["compute_mid"]
+    code = par_recette(moteurs.inventaire_moteurs("PROJ", inclure_code=True))["compute_mid"]
     assert code["moteur_configure"] == "imposé par le type de recette"
 
 
@@ -176,3 +176,23 @@ def test_commande_chat_une_recette(dss, capsys):
 
     asyncio.run(chat_llm.COMMANDES["/moteurs"](session, "/moteurs PROJ inconnue"))
     assert "introuvable" in capsys.readouterr().out
+
+
+def test_recettes_visuelles_par_defaut(dss, capsys):
+    r = moteurs.inventaire_moteurs("PROJ")
+    assert list(par_recette(r)) == ["join_out"]
+    assert r["synthese"]["recettes_code_ou_plugin_ignorees"] == ["compute_mid (python)"]
+    # Une recette de code demandée par son nom est analysée.
+    assert moteurs.inventaire_moteurs("PROJ", "compute_mid")["recettes"][0]["recette"] == "compute_mid"
+    assert moteurs.recette_visuelle("sync") and moteurs.recette_visuelle("shaker")
+    assert not moteurs.recette_visuelle("pyspark")
+    assert not moteurs.recette_visuelle("CustomCode_x")
+
+    from scripts import chat_llm
+    from tests.test_chat_llm import SessionEnMemoire
+
+    asyncio.run(chat_llm.COMMANDES["/moteurs"](SessionEnMemoire(), "/moteurs PROJ"))
+    sortie = capsys.readouterr().out
+    assert "1 recettes visuelles" in sortie
+    assert "compute_mid" not in sortie
+    assert "1 recette(s) de code/plugin non affichées" in sortie

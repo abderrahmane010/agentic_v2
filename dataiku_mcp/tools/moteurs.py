@@ -218,11 +218,22 @@ def _bascule(
     }
 
 
+def recette_visuelle(type_recette: str) -> bool:
+    """Recette visuelle (Sync, Prepare, Join...) : la seule à avoir un vrai
+    choix de moteur. Recettes de code et de plugin : moteur imposé."""
+    return not (
+        type_recette in _MOTEUR_RECETTE_CODE
+        or type_recette in CODE_RECIPE_TYPES
+        or type_recette.startswith("CustomCode_")
+    )
+
+
 def inventaire_moteurs(
     project_key: str,
     recipe_name: Optional[str] = None,
     moteur_cible: Optional[str] = None,
     details: bool = False,
+    inclure_code: bool = False,
 ) -> dict[str, Any]:
     """Moteurs actuels, disponibles et indisponibles des recettes d'un projet.
 
@@ -232,6 +243,9 @@ def inventaire_moteurs(
         moteur_cible: Moteur à évaluer, ex. "SPARK" : pour chaque recette,
             indique si la bascule est possible et sinon pourquoi
         details: Ajouter le statut brut renvoyé par DSS (diagnostic)
+        inclure_code: Inclure aussi les recettes de code et de plugin (par
+            défaut seules les recettes visuelles sont analysées ; une
+            recette demandée par son nom est toujours analysée)
 
     Returns:
         Détail par recette et synthèse ; rien n'est modifié dans DSS.
@@ -244,6 +258,7 @@ def inventaire_moteurs(
     except Exception as e:
         return error(f"Impossible de lister les recettes de '{project_key}' : {e}")
 
+    ignorees: list[str] = []
     if recipe_name:
         items = [r for r in items if r.get("name") == recipe_name]
         if not items:
@@ -251,6 +266,13 @@ def inventaire_moteurs(
                 f"Recette '{recipe_name}' introuvable dans '{project_key}'",
                 "not_found",
             )
+    elif not inclure_code:
+        ignorees = sorted(
+            f"{r.get('name')} ({r.get('type')})"
+            for r in items
+            if not recette_visuelle(str(r.get("type") or ""))
+        )
+        items = [r for r in items if recette_visuelle(str(r.get("type") or ""))]
 
     recettes, erreurs = [], []
     for numero, brut in enumerate(items, start=1):
@@ -272,6 +294,7 @@ def inventaire_moteurs(
 
     synthese: dict[str, Any] = {
         "nb_recettes": len(recettes),
+        "recettes_code_ou_plugin_ignorees": ignorees,
         "par_moteur_selectionne": dict(
             Counter(r["moteur_selectionne"] for r in recettes)
         ),

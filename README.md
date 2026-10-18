@@ -56,7 +56,9 @@ Commandes directes (sans LLM, sortie complète) :
 - `/interfaces [PROJET]` : tables d'un projet utilisées par d'autres projets
   (y compris une table « finale » dans son projet), emplacements écrits par
   plusieurs projets et sources externes partagées
-- `/moteurs PROJET [RECETTE] [CIBLE]` : moteur d'exécution de chaque recette (menu
+- `/moteurs PROJET [RECETTE] [CIBLE] [tout]` : par défaut seules les recettes
+  visuelles (celles qui ont un choix de moteur) ; `tout` ajoute les recettes de
+  code et de plugin. moteur d'exécution de chaque recette (menu
   « Engine » au-dessus de RUN) : moteur configuré, moteur réellement
   sélectionné par DSS, moteurs disponibles et indisponibles avec la raison
   donnée par DSS, et possibilité de passer au moteur CIBLE (ex. `SPARK`).
