@@ -97,3 +97,13 @@ def test_outils_du_prompt_existent():
     cites = set(re.findall(r"\b(?:get|list|classer|check|inspect|search|export|"
                            r"dependances|inventaire)_[a-z_]+", chat_llm.PROMPT_SYSTEME))
     assert cites and cites <= noms, cites - noms
+
+
+def test_logs_par_nom_et_scenario_inconnu(dss, capsys):
+    assert "Première erreur : Table missing" in lancer("/logs PROJ Daily build", capsys)
+    from scripts import chat_llm
+    assert chat_llm.re.match(r"^\d{4}-\d{2}-\d{2}-", "2026-10-18-19-04-56-210")
+    sortie = lancer("/logs PROJ SCENARIO", capsys)
+    assert "Scénario « SCENARIO » introuvable" in sortie
+    assert "SC1  (Daily build)" in sortie
+    assert "Exemple : /logs PROJ SC1" in sortie

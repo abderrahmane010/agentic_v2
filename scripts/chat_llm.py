@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -719,18 +720,57 @@ async def _afficher_echecs(session: ClientSession, commande: str) -> None:
     print("\n→ Cause d'un échec de scénario : /logs PROJET SCENARIO")
 
 
+async def _resoudre_scenario(
+    session: ClientSession, projet: str, saisie: str
+) -> str | None:
+    """Identifiant du scénario à partir de son id ou de son nom affiché.
+
+    Affiche la liste des scénarios du projet si rien ne correspond.
+    """
+    donnees = await _appeler(session, "list_scenarios", {"project_key": projet})
+    if donnees is None:
+        return None
+    scenarios = donnees["scenarios"]
+    for sc in scenarios:
+        if saisie in (sc["id"], sc.get("name")):
+            return sc["id"]
+    for sc in scenarios:
+        if saisie.lower() in (sc["id"].lower(), str(sc.get("name") or "").lower()):
+            return sc["id"]
+    if not scenarios:
+        print(f"Le projet {projet} n'a aucun scénario.")
+        return None
+    print(f"Scénario « {saisie} » introuvable dans {projet}. Scénarios disponibles :")
+    for sc in scenarios:
+        print(f"  - {sc['id']}  ({sc.get('name')})")
+    print(f"Exemple : /logs {projet} {scenarios[0]['id']}")
+    return None
+
+
 async def _afficher_logs(session: ClientSession, commande: str) -> None:
     morceaux = commande.split()
     if len(morceaux) < 3:
-        print("Usage : /logs PROJET SCENARIO [RUN_ID]")
+        print("Usage : /logs PROJET SCENARIO [RUN_ID]   "
+              "(SCENARIO = identifiant ou nom, voir /scenarios PROJET)")
+        return
+    # Le nom affiché d'un scénario peut contenir des espaces.
+    # Identifiant de run DSS : "2026-10-18-19-04-56-210" (date et heure).
+    run_id = (
+        morceaux[-1]
+        if len(morceaux) > 3 and re.match(r"^\d{4}-\d{2}-\d{2}-", morceaux[-1])
+        else None
+    )
+    saisie = " ".join(morceaux[2:-1] if run_id else morceaux[2:])
+    scenario_id = await _resoudre_scenario(session, morceaux[1], saisie)
+    if scenario_id is None:
         return
     arguments: dict[str, Any] = {
         "project_key": morceaux[1],
-        "scenario_id": morceaux[2],
+        "scenario_id": scenario_id,
         "max_chars": 3000,
     }
-    if len(morceaux) > 3:
-        arguments["run_id"] = morceaux[3]
+    if run_id:
+        arguments["run_id"] = run_id
     donnees = await _appeler(session, "get_scenario_logs", arguments)
     if not donnees:
         return
