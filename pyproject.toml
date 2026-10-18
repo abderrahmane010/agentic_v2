@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "dataiku-api-client==14.0.0",
     "mcp>=1.2,<2",
+    "openai>=1.0",
     "pyyaml",
     "pydantic>=2.0.0",
     "python-dotenv",
@@ -27,6 +28,7 @@ include = ["dataiku_mcp*", "scripts*"]
 
 [project.scripts]
 dataiku-mcp-server = "scripts.mcp_server:main"
+dataiku-chat = "scripts.chat_llm:run"
 
 [tool.ruff]
 line-length = 88

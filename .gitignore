@@ -143,3 +143,10 @@ Thumbs.db
 dataiku_mcp.log
 bandit-report.json
 *.tmp
+# Generated reports
+rapports/
+
+# Variantes d'environnement (clés API) et environnements virtuels
+.env.*
+!.env.sample
+.venv*/

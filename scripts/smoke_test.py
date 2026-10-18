@@ -33,6 +33,7 @@ from dataiku_mcp.tools import (  # noqa: E402
     datasets,
     environment_config,
     monitoring_debug,
+    moteurs,
     productivity,
     project_exploration,
     recipes,
@@ -84,6 +85,7 @@ def main() -> int:
         ("get_connections", lambda: environment_config.get_connections(pk)),
         ("get_recent_runs", lambda: monitoring_debug.get_recent_runs(pk)),
         ("export_project_config", lambda: productivity.export_project_config(pk)),
+        ("inventaire_moteurs", lambda: moteurs.inventaire_moteurs(pk, moteur_cible="SPARK")),
         ("duplicate_project_structure (dry run)", lambda: productivity.duplicate_project_structure(pk, pk + "_COPY")),
     ]
     if dataset:
@@ -144,7 +146,8 @@ def main() -> int:
               f"recette_code={code_recipe} scénario={scenario} job={job_id}")
 
     failures = [r for r in report if r["status"] != "ok"]
-    print(f"\n{len(report) - len(failures)}/{len(report)} outils OK", file=sys.stderr)
+    if not args.json:
+        print(f"\n{len(report) - len(failures)}/{len(report)} outils OK")
     return 1 if failures else 0
 
 
